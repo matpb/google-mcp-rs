@@ -180,8 +180,14 @@ pub async fn consume_state(db: &Db, state_id: &str) -> Result<Option<OauthState>
 pub async fn sweep_expired(db: &Db) -> Result<usize, DbError> {
     let now = now_secs();
     db.call(move |conn| {
-        let a = conn.execute("DELETE FROM oauth_codes WHERE expires_at < ?1", params![now])?;
-        let b = conn.execute("DELETE FROM oauth_states WHERE expires_at < ?1", params![now])?;
+        let a = conn.execute(
+            "DELETE FROM oauth_codes WHERE expires_at < ?1",
+            params![now],
+        )?;
+        let b = conn.execute(
+            "DELETE FROM oauth_states WHERE expires_at < ?1",
+            params![now],
+        )?;
         Ok(a + b)
     })
     .await

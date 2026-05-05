@@ -23,11 +23,7 @@ pub struct UpsertAccount {
     pub scopes: Vec<String>,
 }
 
-pub async fn upsert(
-    db: &Db,
-    encryption_key: &[u8; 32],
-    req: UpsertAccount,
-) -> Result<(), DbError> {
+pub async fn upsert(db: &Db, encryption_key: &[u8; 32], req: UpsertAccount) -> Result<(), DbError> {
     let sealed = crypto::seal(
         encryption_key,
         req.google_sub.as_bytes(),
@@ -120,8 +116,8 @@ pub async fn get_refresh_token(
         return Ok(None);
     };
     let plaintext = crypto::unseal(encryption_key, google_sub.as_bytes(), &nonce, &ct)?;
-    let token = String::from_utf8(plaintext)
-        .map_err(|_| DbError::Crypto(crypto::CryptoError::Decrypt))?;
+    let token =
+        String::from_utf8(plaintext).map_err(|_| DbError::Crypto(crypto::CryptoError::Decrypt))?;
     Ok(Some(token))
 }
 
@@ -294,9 +290,23 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(get(&db, "sub-1").await.unwrap().unwrap().last_refresh_at.is_none());
+        assert!(
+            get(&db, "sub-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .last_refresh_at
+                .is_none()
+        );
         touch_last_refresh(&db, "sub-1").await.unwrap();
-        assert!(get(&db, "sub-1").await.unwrap().unwrap().last_refresh_at.is_some());
+        assert!(
+            get(&db, "sub-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .last_refresh_at
+                .is_some()
+        );
     }
 
     #[tokio::test]

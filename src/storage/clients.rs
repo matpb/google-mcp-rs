@@ -1,9 +1,9 @@
 //! `mcp_clients` CRUD. Stores Argon2id PHC hashes of MCP client secrets
 //! issued via RFC 7591 dynamic client registration.
 
+use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
 use rusqlite::params;
 
 use super::{Db, DbError, now_secs};
