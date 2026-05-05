@@ -1,10 +1,34 @@
 //! All `Params` structs for the rmcp tool surface, in one place.
 //! Easier to scan and review the schema than scrolling through tool bodies.
 
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::Deserialize;
 
 use crate::mime::{AttachmentInput, Recipient};
+
+// ---------------------------------------------------------------------------
+// Schema helpers
+// ---------------------------------------------------------------------------
+//
+// schemars 1.x renders `serde_json::Value` as the boolean literal `true`
+// (JSON Schema 2020-12 lets a boolean stand in for any-schema). Some MCP
+// clients — notably Claude Code 2.1.x, which validates `inputSchema` with
+// Zod — reject boolean schemas with "Invalid input" and silently DROP the
+// entire tool list. We override these fields with concrete `{type: ...}`
+// schemas so the validator is happy. The runtime accepts any JSON because
+// `serde_json::Value` parses anything.
+
+fn schema_any_object(_: &mut SchemaGenerator) -> Schema {
+    schemars::json_schema!({ "type": "object" })
+}
+
+fn schema_optional_any_object(_: &mut SchemaGenerator) -> Schema {
+    schemars::json_schema!({ "type": ["object", "null"] })
+}
+
+fn schema_any_array(_: &mut SchemaGenerator) -> Schema {
+    schemars::json_schema!({ "type": "array" })
+}
 
 // ---------------------------------------------------------------------------
 // Read
@@ -306,6 +330,7 @@ pub struct SheetsUpdateValuesParams {
     pub spreadsheet_id: String,
     pub range: String,
     /// 2-D array, e.g. `[["A1","B1"],["A2","B2"]]`.
+    #[schemars(schema_with = "schema_any_array")]
     pub values: serde_json::Value,
     /// `RAW` (default — values stored as-is) or `USER_ENTERED` (parses
     /// formulas, dates, percentages like the UI does).
@@ -320,6 +345,7 @@ pub struct SheetsAppendValuesParams {
     pub spreadsheet_id: String,
     /// A1 range that defines the table to append to (e.g. `Sheet1!A:Z`).
     pub range: String,
+    #[schemars(schema_with = "schema_any_array")]
     pub values: serde_json::Value,
     /// `RAW` (default) or `USER_ENTERED`.
     #[serde(default)]
@@ -340,6 +366,7 @@ pub struct SheetsBatchUpdateValuesParams {
     pub spreadsheet_id: String,
     /// Body for the values:batchUpdate API. Pass the full body, e.g.
     /// `{"valueInputOption":"USER_ENTERED","data":[{"range":"...","values":[[...]]}]}`.
+    #[schemars(schema_with = "schema_any_object")]
     pub body: serde_json::Value,
 }
 
@@ -349,6 +376,7 @@ pub struct SheetsBatchUpdateParams {
     /// Full body for spreadsheets:batchUpdate, e.g.
     /// `{"requests":[{"addSheet":{"properties":{"title":"X"}}}],"includeSpreadsheetInResponse":true}`.
     /// See https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/request
+    #[schemars(schema_with = "schema_any_object")]
     pub body: serde_json::Value,
 }
 
@@ -582,6 +610,7 @@ pub struct DocsBatchUpdateParams {
     /// Full body for documents:batchUpdate, e.g.
     /// `{"requests":[{"insertText":{"location":{"index":1},"text":"..."}}]}`.
     /// See https://developers.google.com/docs/api/reference/rest/v1/documents/request
+    #[schemars(schema_with = "schema_any_object")]
     pub body: serde_json::Value,
 }
 
@@ -886,6 +915,7 @@ pub struct CalendarEventFields {
     /// structured fields above. See
     /// https://developers.google.com/calendar/api/v3/reference/events.
     #[serde(default)]
+    #[schemars(schema_with = "schema_optional_any_object")]
     pub extra_event_fields: Option<serde_json::Value>,
 }
 
