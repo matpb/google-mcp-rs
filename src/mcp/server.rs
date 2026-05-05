@@ -26,7 +26,8 @@ impl GoogleMcp {
         let tool_router = Self::gmail_router()
             + Self::sheets_router()
             + Self::drive_router()
-            + Self::docs_router();
+            + Self::docs_router()
+            + Self::calendar_router();
         Self { state, tool_router }
     }
 
@@ -59,17 +60,21 @@ impl ServerHandler for GoogleMcp {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
-            "Google Workspace MCP — Gmail + Sheets + Drive. Multi-tenant: \
-             each user authorizes via the OAuth flow at /authorize and the \
-             server mints an MCP JWT bound to their Google sub. All tools \
-             operate on the authenticated user's data; one Google account \
-             per JWT for now. The Gmail send surface is live by default \
-             (no draft-only safety knob), so route agents to \
-             gmail_create_draft when you want explicit human approval. \
-             Drive's `drive_delete_permanent` is irreversible — prefer \
-             `drive_trash_file`. Sheets `value_input_option=USER_ENTERED` \
-             parses formulas/dates the way the UI does; `RAW` (default) \
-             stores values verbatim."
+            "Google Workspace MCP — Gmail + Sheets + Drive + Docs + Calendar. \
+             Multi-tenant: each user authorizes via the OAuth flow at \
+             /authorize and the server mints an MCP JWT bound to their \
+             Google sub. All tools operate on the authenticated user's \
+             data; one Google account per JWT for now. The Gmail send \
+             surface is live by default (no draft-only safety knob), so \
+             route agents to gmail_create_draft when you want explicit \
+             human approval. Drive's `drive_delete_permanent` is \
+             irreversible — prefer `drive_trash_file`. Sheets \
+             `value_input_option=USER_ENTERED` parses formulas/dates the \
+             way the UI does; `RAW` (default) stores values verbatim. \
+             Calendar event mutations default to `send_updates=none` so \
+             agents don't accidentally email guests; pass \
+             `send_updates=\"all\"` when the human-facing notification \
+             is intentional."
                 .into(),
         );
         info

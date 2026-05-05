@@ -24,6 +24,7 @@ use rmcp::model::ErrorCode;
 use serde_json::{Value, json};
 
 use crate::credentials::CredentialsError;
+use crate::google::calendar::CalendarError;
 use crate::google::docs::DocsError;
 use crate::google::drive::DriveError;
 use crate::google::gmail::GmailError;
@@ -215,6 +216,8 @@ fn default_not_found_hint(kind: &str) -> String {
         "spreadsheet" => "Use drive_list_files with `mimeType = 'application/vnd.google-apps.spreadsheet'` to find spreadsheets.".into(),
         "document" => "Use drive_list_files with `mimeType = 'application/vnd.google-apps.document'` to find Google Docs.".into(),
         "permission" => "Use drive_list_permissions to discover valid permission IDs for a file.".into(),
+        "calendar" => "Use calendar_list_calendars to discover valid calendar IDs (or use \"primary\" for the user's main calendar).".into(),
+        "event" => "Use calendar_list_events to discover valid event IDs.".into(),
         _ => format!("Verify the {kind} ID exists."),
     }
 }
@@ -286,6 +289,21 @@ impl From<DriveError> for McpError {
             DriveError::Parse(err) => {
                 McpError::internal(format!("could not parse Drive response: {err}"))
                     .with_service("drive")
+            }
+        }
+    }
+}
+
+impl From<CalendarError> for McpError {
+    fn from(e: CalendarError) -> Self {
+        match e {
+            CalendarError::Http(err) => transient_from_reqwest("calendar", err),
+            CalendarError::Api { status, message } => {
+                google_api_error("calendar", status.as_u16(), message, None)
+            }
+            CalendarError::Parse(err) => {
+                McpError::internal(format!("could not parse Calendar response: {err}"))
+                    .with_service("calendar")
             }
         }
     }

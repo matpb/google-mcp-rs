@@ -2,13 +2,13 @@
 
 A multi-tenant **Model Context Protocol** server for **Google Workspace**, written in Rust. Built around streamable HTTP transport with full **OAuth 2.1** so it plugs straight into Claude.ai, Claude Code, ChatGPT custom connectors, Cursor, or any MCP client that speaks the 2025-11-25 authorization spec.
 
-> **Status:** v0.4.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) live. **62 tools** total.
+> **Status:** v0.5.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) live. **76 tools** total.
 
 ## Why
 
 The first-party Google Workspace MCP server is missing fundamentals (you cannot send an email from it). Existing community servers are Python or single-tenant. `google-mcp-rs` aims to be the Rust server you actually want to deploy:
 
-- **Full Gmail / Sheets / Drive / Docs surface** — 57 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), and Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure).
+- **Full Gmail / Sheets / Drive / Docs / Calendar surface** — 76 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), and Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence).
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256.
 - **Streamable HTTP only** — no stdio. Designed to live behind a tunnel, talk to remote MCP clients.
@@ -52,7 +52,7 @@ State is threaded MCP-client → Google → callback via single-use opaque token
 In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
 
 1. Pick or create a GCP project.
-2. Enable the **Gmail API**, **Sheets API**, **Drive API**, and **Docs API**.
+2. Enable the **Gmail API**, **Sheets API**, **Drive API**, **Docs API**, and **Calendar API**.
 3. **OAuth consent screen** → External, app name `google-mcp` (or whatever you want users to see), user support email, developer email.
 4. Add scopes:
    - `openid`
@@ -61,6 +61,7 @@ In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
    - `https://www.googleapis.com/auth/spreadsheets`
    - `https://www.googleapis.com/auth/drive`
    - `https://www.googleapis.com/auth/documents`
+   - `https://www.googleapis.com/auth/calendar`
 5. Add yourself + any beta users to the **Test users** list (until the app is verified, only test users can authorize — see [Caveats](#caveats)).
 6. **Credentials** → **Create credentials** → **OAuth 2.0 Client ID** → **Web application**.
 7. Authorized redirect URI: `${BASE_URL}/oauth/google/callback` (e.g. `http://localhost:8433/oauth/google/callback` for dev).
@@ -214,6 +215,27 @@ Claude Code will surface the OAuth flow in your terminal on first use.
 | `drive_list_permissions` | List sharing entries |
 | `drive_delete_permission` | Remove a sharing entry by ID |
 
+### Calendar (14)
+
+| Tool | Purpose |
+|---|---|
+| `calendar_list_calendars` | List the calendars on the user's calendar list (primary + subscribed). Use to discover IDs |
+| `calendar_get_calendar` | Get a calendar's metadata (`"primary"` for the user's main calendar) |
+| `calendar_create_calendar` | Create a secondary calendar |
+| `calendar_delete_calendar` | **Irreversibly** delete a secondary calendar (primary cannot be deleted) |
+| `calendar_list_events` | List/search events. Expands recurrences by default (`single_events=true`). Filter by `time_min`/`time_max`/`q`/`updated_min` |
+| `calendar_get_event` | Get a single event by ID |
+| `calendar_create_event` | Create an event with structured fields — timed (`start_date_time` + `end_date_time` RFC3339) or all-day (`start_date` + `end_date`), attendees, RRULE recurrence, popup reminders, optional Google Meet link, color, visibility, transparency, plus `extra_event_fields` escape hatch |
+| `calendar_quick_add_event` | Natural-language event creation (`Lunch with Sara tomorrow at 1pm`) |
+| `calendar_patch_event` | Partial update — same structured fields as create, all optional. **Setting `attendees` REPLACES the list** |
+| `calendar_delete_event` | Delete an event (use `send_updates="all"` to notify guests) |
+| `calendar_move_event` | Move an event to a different calendar |
+| `calendar_respond_to_event` | Set the user's (or another attendee's) `responseStatus`: accepted / declined / tentative |
+| `calendar_freebusy` | Free/busy across one or more calendars within a time window — for conflict checking before scheduling |
+| `calendar_list_colors` | Calendar + event color palette (for `colorId`) |
+
+> **Default `send_updates=none`.** Calendar mutations don't email guests by default — pass `send_updates="all"` (or `"externalOnly"`) explicitly when you want a notification. This keeps agents from spamming inboxes during retries or batch operations.
+
 ## Error contract
 
 Every error returned by the server includes a structured `data` payload alongside the human-readable `message`. Agents can switch on `category` and `retryable` programmatically without parsing the message string.
@@ -256,7 +278,7 @@ Every error returned by the server includes a structured `data` payload alongsid
 
 ## Caveats
 
-- **Unverified app cap.** Until your OAuth client is verified by Google, only **test users** (added in the GCP Console) can authorize, and the app is hard-capped at 100 users for its lifetime. `gmail.modify`, `drive`, and `spreadsheets` are all **restricted/sensitive scopes** — verification for the full set requires a [CASA assessment](https://cloud.google.com/security/compliance/casa) (2–6 weeks, plus privacy policy URL, terms of service URL, demo video).
+- **Unverified app cap.** Until your OAuth client is verified by Google, only **test users** (added in the GCP Console) can authorize, and the app is hard-capped at 100 users for its lifetime. `gmail.modify`, `drive`, `spreadsheets`, `documents`, and `calendar` are all **restricted/sensitive scopes** — verification for the full set requires a [CASA assessment](https://cloud.google.com/security/compliance/casa) (2–6 weeks, plus privacy policy URL, terms of service URL, demo video).
 - **One Google account per JWT (Phase 1).** To use a second Google account, complete the OAuth flow again. Per-tool `account` parameter for in-session switching is on the Phase 2 roadmap.
 - **No send-safety knob.** Tools execute `gmail_send` immediately. If you want a draft-only mode, do not expose `gmail_send` to the agent — point it at `gmail_create_draft` instead.
 - **ID token signature not verified in MVP.** The server trusts Google's ID token because the channel to Google's token endpoint is TLS. Hardening to verify against Google's JWKS is on the roadmap.
@@ -266,7 +288,7 @@ Every error returned by the server includes a structured `data` payload alongsid
 ## Roadmap
 
 - **Per-tool `account` parameter** for multi-account workflows in a single MCP session.
-- **Calendar, Docs, Forms, People** — the rest of the Workspace surface.
+- **Forms, People (Contacts), Tasks** — the rest of the Workspace surface.
 - **Resumable Drive uploads** for files larger than ~5 MB.
 - **Hardening:** ID token JWKS verification, refresh token rotation, structured per-account audit log.
 

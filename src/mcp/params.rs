@@ -713,3 +713,268 @@ pub struct DocsInsertImageParams {
     #[serde(default)]
     pub at_index: Option<u32>,
 }
+
+// ===========================================================================
+// Calendar
+// ===========================================================================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarListCalendarsParams {
+    /// Page size (Google default 100, max 250).
+    #[serde(default)]
+    pub max_results: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+    /// Include calendars the user has hidden from their list. Default false.
+    #[serde(default)]
+    pub show_hidden: bool,
+    /// Include calendars marked deleted. Default false.
+    #[serde(default)]
+    pub show_deleted: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarGetCalendarParams {
+    /// Calendar ID — `"primary"` for the user's main calendar, an email
+    /// address for a person/group calendar, or a `…@group.calendar.google.com`
+    /// ID for a secondary calendar.
+    pub calendar_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarCreateCalendarParams {
+    pub summary: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    /// IANA time zone (e.g. `America/Montreal`). Defaults to the user's.
+    #[serde(default)]
+    pub time_zone: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarDeleteCalendarParams {
+    /// Calendar ID. The user's primary calendar cannot be deleted —
+    /// Google rejects with 403/400.
+    pub calendar_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarListEventsParams {
+    /// Calendar ID. Use `"primary"` for the user's main calendar. Default `primary`.
+    #[serde(default = "default_primary_calendar")]
+    pub calendar_id: String,
+    /// Lower bound (inclusive). RFC3339 timestamp with offset, e.g. `2026-05-05T00:00:00-04:00`.
+    #[serde(default)]
+    pub time_min: Option<String>,
+    /// Upper bound (exclusive). RFC3339 timestamp with offset.
+    #[serde(default)]
+    pub time_max: Option<String>,
+    /// Free-text search across summary, description, location, attendees.
+    #[serde(default)]
+    pub q: Option<String>,
+    /// Page size (Google default 250, max 2500).
+    #[serde(default)]
+    pub max_results: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+    /// `true` (recommended for agent reads) expands recurring events into
+    /// individual instances. Default `true`.
+    #[serde(default = "default_true")]
+    pub single_events: bool,
+    /// `startTime` (only valid with `single_events=true`) or `updated`.
+    #[serde(default)]
+    pub order_by: Option<String>,
+    /// Include cancelled events. Default false.
+    #[serde(default)]
+    pub show_deleted: bool,
+    /// IANA time zone applied to returned `dateTime` strings. Defaults to calendar's.
+    #[serde(default)]
+    pub time_zone: Option<String>,
+    /// Lower bound (inclusive) on event modification time, RFC3339.
+    #[serde(default)]
+    pub updated_min: Option<String>,
+}
+
+fn default_primary_calendar() -> String {
+    "primary".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarGetEventParams {
+    #[serde(default = "default_primary_calendar")]
+    pub calendar_id: String,
+    pub event_id: String,
+    /// Time zone for returned `dateTime` strings.
+    #[serde(default)]
+    pub time_zone: Option<String>,
+}
+
+/// One attendee on an event.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CalendarAttendeeInput {
+    pub email: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Mark as optional attendee. Default false.
+    #[serde(default)]
+    pub optional: bool,
+    /// `needsAction` (default), `accepted`, `declined`, `tentative`.
+    #[serde(default)]
+    pub response_status: Option<String>,
+}
+
+/// Common event payload shared by create + patch tools. All fields are
+/// optional on patch; create requires at least `summary` plus a start/end pair.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct CalendarEventFields {
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    /// All-day start date (YYYY-MM-DD). Mutually exclusive with `start_date_time`.
+    #[serde(default)]
+    pub start_date: Option<String>,
+    /// All-day end date (YYYY-MM-DD, exclusive). Mutually exclusive with `end_date_time`.
+    #[serde(default)]
+    pub end_date: Option<String>,
+    /// Timed start (RFC3339 with offset, e.g. `2026-05-05T13:00:00-04:00`).
+    /// Mutually exclusive with `start_date`.
+    #[serde(default)]
+    pub start_date_time: Option<String>,
+    /// Timed end (RFC3339 with offset). Mutually exclusive with `end_date`.
+    #[serde(default)]
+    pub end_date_time: Option<String>,
+    /// IANA time zone applied to `start_date_time` / `end_date_time` if they
+    /// are provided without an explicit offset (and required for recurring
+    /// timed events).
+    #[serde(default)]
+    pub time_zone: Option<String>,
+    /// Attendees. Setting on a patch REPLACES the existing list — to add or
+    /// remove individuals you need to read first, mutate, then send.
+    #[serde(default)]
+    pub attendees: Option<Vec<CalendarAttendeeInput>>,
+    /// RRULE/EXRULE/RDATE/EXDATE strings, e.g. `["RRULE:FREQ=WEEKLY;BYDAY=MO"]`.
+    #[serde(default)]
+    pub recurrence: Option<Vec<String>>,
+    /// Override default reminders with one or more popup reminders, expressed
+    /// as minutes before the event. Pass an empty list to silence reminders.
+    #[serde(default)]
+    pub reminders_minutes_before: Option<Vec<u32>>,
+    /// `default`, `public`, `private`, or `confidential`.
+    #[serde(default)]
+    pub visibility: Option<String>,
+    /// `opaque` (busy, default) or `transparent` (free).
+    #[serde(default)]
+    pub transparency: Option<String>,
+    /// Numeric color ID from `calendar_list_colors` (`event` palette).
+    #[serde(default)]
+    pub color_id: Option<String>,
+    /// Add a Google Meet conference. Sets `conferenceData.createRequest`.
+    /// Server passes `conferenceDataVersion=1` automatically.
+    #[serde(default)]
+    pub add_conference: bool,
+    /// Free-form merge: any extra Event resource fields (e.g. `attachments`,
+    /// `extendedProperties`, `guestsCanModify`). Merged on top of the
+    /// structured fields above. See
+    /// https://developers.google.com/calendar/api/v3/reference/events.
+    #[serde(default)]
+    pub extra_event_fields: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarCreateEventParams {
+    #[serde(default = "default_primary_calendar")]
+    pub calendar_id: String,
+    #[serde(flatten)]
+    pub event: CalendarEventFields,
+    /// `all`, `externalOnly`, or `none` (default — agent should not spam
+    /// guests by default).
+    #[serde(default)]
+    pub send_updates: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarQuickAddEventParams {
+    #[serde(default = "default_primary_calendar")]
+    pub calendar_id: String,
+    /// Natural-language event description, e.g.
+    /// `Lunch with Sara tomorrow at 1pm` or
+    /// `Dentist 2026-06-12 14:00`. Google's parser is timezone-aware on
+    /// the calendar's time zone.
+    pub text: String,
+    #[serde(default)]
+    pub send_updates: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarPatchEventParams {
+    #[serde(default = "default_primary_calendar")]
+    pub calendar_id: String,
+    pub event_id: String,
+    #[serde(flatten)]
+    pub event: CalendarEventFields,
+    #[serde(default)]
+    pub send_updates: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarDeleteEventParams {
+    #[serde(default = "default_primary_calendar")]
+    pub calendar_id: String,
+    pub event_id: String,
+    #[serde(default)]
+    pub send_updates: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarMoveEventParams {
+    #[serde(default = "default_primary_calendar")]
+    pub calendar_id: String,
+    pub event_id: String,
+    /// Target calendar ID.
+    pub destination_calendar_id: String,
+    #[serde(default)]
+    pub send_updates: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarRespondToEventParams {
+    #[serde(default = "default_primary_calendar")]
+    pub calendar_id: String,
+    pub event_id: String,
+    /// Email address of the attendee whose response to set. Defaults to the
+    /// authenticated user's email (looked up via `gmail_get_profile` /
+    /// session). Provide explicitly if responding on behalf of another
+    /// attendee.
+    #[serde(default)]
+    pub attendee_email: Option<String>,
+    /// `accepted`, `declined`, or `tentative`.
+    pub response_status: String,
+    /// Optional comment (free text shown to other attendees).
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub send_updates: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CalendarFreebusyParams {
+    /// RFC3339 lower bound.
+    pub time_min: String,
+    /// RFC3339 upper bound.
+    pub time_max: String,
+    /// Calendar IDs to query. Default: `["primary"]`.
+    #[serde(default)]
+    pub calendar_ids: Vec<String>,
+    /// IANA time zone for the returned busy intervals. Defaults to UTC.
+    #[serde(default)]
+    pub time_zone: Option<String>,
+}
