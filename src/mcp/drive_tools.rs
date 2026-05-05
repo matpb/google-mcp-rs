@@ -10,6 +10,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 use serde_json::json;
 
+use crate::errors::{McpError, to_mcp};
 use crate::google::drive::{DriveClient, DriveError};
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
@@ -41,7 +42,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(to_mcp)
     }
 
     #[tool(
@@ -59,7 +60,7 @@ impl GoogleMcp {
             .get_file(&p.file_id, p.fields.as_deref(), p.supports_all_drives)
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
     }
 
     #[tool(
@@ -87,7 +88,7 @@ impl GoogleMcp {
             .create_metadata_only(&body)
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(to_mcp)
     }
 
     #[tool(
@@ -99,9 +100,11 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveCreateFileParams>,
     ) -> Result<String, ErrorData> {
+        // Validate inputs before resolving the session so a bad base64
+        // payload doesn't have to wait on a Google round-trip to surface.
+        let bytes = decode_b64(&p.data_base64)?;
         let session = self.resolve_session(&parts).await?;
         let client = DriveClient::new((*self.state.http).clone(), session.access_token);
-        let bytes = decode_b64(&p.data_base64)?;
         let mut metadata = json!({
             "name": p.name,
             "mimeType": p.mime_type,
@@ -116,7 +119,7 @@ impl GoogleMcp {
             .create_with_content(&metadata, &bytes, &p.mime_type)
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(to_mcp)
     }
 
     #[tool(
@@ -149,7 +152,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
     }
 
     #[tool(
@@ -161,14 +164,14 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveUpdateContentParams>,
     ) -> Result<String, ErrorData> {
+        let bytes = decode_b64(&p.data_base64)?;
         let session = self.resolve_session(&parts).await?;
         let client = DriveClient::new((*self.state.http).clone(), session.access_token);
-        let bytes = decode_b64(&p.data_base64)?;
         client
             .update_content(&p.file_id, &bytes, &p.mime_type)
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
     }
 
     #[tool(
@@ -185,7 +188,7 @@ impl GoogleMcp {
         let (ct, bytes) = client
             .download_file(&p.file_id)
             .await
-            .map_err(drive_to_error)?;
+            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))?;
         let b64 = STANDARD.encode(&bytes);
         Ok(json!({
             "contentType": ct,
@@ -209,7 +212,7 @@ impl GoogleMcp {
         let (ct, bytes) = client
             .export_file(&p.file_id, &p.export_mime_type)
             .await
-            .map_err(drive_to_error)?;
+            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))?;
         let b64 = STANDARD.encode(&bytes);
         Ok(json!({
             "contentType": ct,
@@ -241,7 +244,7 @@ impl GoogleMcp {
             .copy_file(&p.file_id, &metadata)
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
     }
 
     #[tool(
@@ -259,7 +262,7 @@ impl GoogleMcp {
             .trash_file(&p.file_id)
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
     }
 
     #[tool(
@@ -277,7 +280,7 @@ impl GoogleMcp {
             .delete_permanent(&p.file_id)
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
     }
 
     #[tool(
@@ -289,6 +292,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveSharePermissionParams>,
     ) -> Result<String, ErrorData> {
+        validate_share(&p)?;
         let session = self.resolve_session(&parts).await?;
         let client = DriveClient::new((*self.state.http).clone(), session.access_token);
         let mut perm = json!({
@@ -310,7 +314,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
     }
 
     #[tool(
@@ -328,7 +332,7 @@ impl GoogleMcp {
             .list_permissions(&p.file_id)
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
     }
 
     #[tool(
@@ -342,16 +346,60 @@ impl GoogleMcp {
     ) -> Result<String, ErrorData> {
         let session = self.resolve_session(&parts).await?;
         let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        // 404 here is ambiguous between file_id and permission_id;
+        // surface it as `permission` not_found since the parent file
+        // existence is implicit (the agent could discover that themselves).
         client
             .delete_permission(&p.file_id, &p.permission_id)
             .await
             .map(|v| v.to_string())
-            .map_err(drive_to_error)
+            .map_err(|e| reclassify_drive_not_found(e, "permission", &p.permission_id))
     }
 }
 
-fn drive_to_error(e: DriveError) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
+/// Re-classify a Drive 404 into a typed `NotFound` so agents target their
+/// discovery (e.g. `drive_list_files`) correctly.
+fn reclassify_drive_not_found(e: DriveError, kind: &'static str, id: &str) -> ErrorData {
+    if let DriveError::Api { status, .. } = &e
+        && status.as_u16() == 404
+    {
+        return McpError::not_found(kind, id, "drive").into();
+    }
+    to_mcp(e)
+}
+
+fn validate_share(p: &DriveSharePermissionParams) -> Result<(), ErrorData> {
+    let role = p.role.as_str();
+    if !matches!(
+        role,
+        "reader" | "commenter" | "writer" | "fileOrganizer" | "organizer" | "owner"
+    ) {
+        return Err(McpError::invalid_input(format!(
+            "invalid `role`: {role}; must be one of reader, commenter, writer, fileOrganizer, organizer, owner"
+        ))
+        .into());
+    }
+    let typ = p.r#type.as_str();
+    if !matches!(typ, "user" | "group" | "domain" | "anyone") {
+        return Err(McpError::invalid_input(format!(
+            "invalid `type`: {typ}; must be one of user, group, domain, anyone"
+        ))
+        .into());
+    }
+    if matches!(typ, "user" | "group") && p.email_address.as_deref().unwrap_or("").is_empty() {
+        return Err(
+            McpError::invalid_input(format!("`type={typ}` requires `email_address`"))
+                .with_hint("Pass the recipient's email in `email_address`.")
+                .into(),
+        );
+    }
+    if typ == "domain" && p.domain.as_deref().unwrap_or("").is_empty() {
+        return Err(McpError::invalid_input(
+            "`type=domain` requires `domain` (e.g. `example.com`)",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn decode_b64(s: &str) -> Result<Vec<u8>, ErrorData> {

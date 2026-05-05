@@ -8,6 +8,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 use serde_json::{Value, json};
 
+use crate::errors::{McpError, to_mcp};
 use crate::google::sheets::{SheetsClient, SheetsError};
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
@@ -45,7 +46,7 @@ impl GoogleMcp {
             .create(&body)
             .await
             .map(|v| v.to_string())
-            .map_err(sheets_to_error)
+            .map_err(to_mcp)
     }
 
     #[tool(
@@ -68,7 +69,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(sheets_to_error)
+            .map_err(to_mcp)
     }
 
     #[tool(
@@ -92,7 +93,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(sheets_to_error)
+            .map_err(to_mcp)
     }
 
     #[tool(
@@ -115,7 +116,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(sheets_to_error)
+            .map_err(to_mcp)
     }
 
     #[tool(
@@ -127,9 +128,11 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SheetsUpdateValuesParams>,
     ) -> Result<String, ErrorData> {
+        ensure_2d_values(&p.values, "values")?;
         let session = self.resolve_session(&parts).await?;
         let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
         let opt = p.value_input_option.as_deref().unwrap_or("RAW");
+        let sid = p.spreadsheet_id.clone();
         client
             .update_values(
                 &p.spreadsheet_id,
@@ -140,7 +143,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(sheets_to_error)
+            .map_err(|e| reclassify_sheets_not_found(e, &sid))
     }
 
     #[tool(
@@ -152,9 +155,11 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SheetsAppendValuesParams>,
     ) -> Result<String, ErrorData> {
+        ensure_2d_values(&p.values, "values")?;
         let session = self.resolve_session(&parts).await?;
         let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
         let opt = p.value_input_option.as_deref().unwrap_or("RAW");
+        let sid = p.spreadsheet_id.clone();
         client
             .append_values(
                 &p.spreadsheet_id,
@@ -165,7 +170,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(sheets_to_error)
+            .map_err(|e| reclassify_sheets_not_found(e, &sid))
     }
 
     #[tool(
@@ -183,7 +188,7 @@ impl GoogleMcp {
             .clear_values(&p.spreadsheet_id, &p.range)
             .await
             .map(|v| v.to_string())
-            .map_err(sheets_to_error)
+            .map_err(to_mcp)
     }
 
     #[tool(
@@ -201,7 +206,7 @@ impl GoogleMcp {
             .batch_update_values(&p.spreadsheet_id, &p.body)
             .await
             .map(|v| v.to_string())
-            .map_err(sheets_to_error)
+            .map_err(to_mcp)
     }
 
     #[tool(
@@ -219,7 +224,7 @@ impl GoogleMcp {
             .batch_update(&p.spreadsheet_id, &p.body)
             .await
             .map(|v| v.to_string())
-            .map_err(sheets_to_error)
+            .map_err(to_mcp)
     }
 
     #[tool(
@@ -254,7 +259,7 @@ impl GoogleMcp {
             .batch_update(&p.spreadsheet_id, &body)
             .await
             .map(|v| v.to_string())
-            .map_err(sheets_to_error)
+            .map_err(to_mcp)
     }
 
     #[tool(
@@ -277,10 +282,41 @@ impl GoogleMcp {
             .batch_update(&p.spreadsheet_id, &body)
             .await
             .map(|v| v.to_string())
-            .map_err(sheets_to_error)
+            .map_err(to_mcp)
     }
 }
 
-fn sheets_to_error(e: SheetsError) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
+/// Re-classify a Sheets 404 into a typed `NotFound` with the spreadsheet
+/// kind set so agents target their discovery correctly.
+fn reclassify_sheets_not_found(e: SheetsError, spreadsheet_id: &str) -> ErrorData {
+    if let SheetsError::Api { status, .. } = &e
+        && status.as_u16() == 404
+    {
+        return McpError::not_found("spreadsheet", spreadsheet_id, "sheets").into();
+    }
+    to_mcp(e)
+}
+
+/// Validate that `values` is a 2-D JSON array. Sheets returns a confusing
+/// 400 if it isn't; pre-checking gives the agent a clearer signal.
+fn ensure_2d_values(v: &Value, field: &str) -> Result<(), ErrorData> {
+    let Some(rows) = v.as_array() else {
+        return Err(McpError::invalid_input(format!(
+            "`{field}` must be a 2-D array of cell values"
+        ))
+        .with_hint("e.g. [[\"a\",\"b\"],[\"c\",\"d\"]] (an array of row arrays).")
+        .into());
+    };
+    for (i, row) in rows.iter().enumerate() {
+        if !row.is_array() {
+            return Err(McpError::invalid_input(format!(
+                "`{field}[{i}]` must be an array (a row of cells)"
+            ))
+            .with_hint(
+                "Each row is itself an array; cells inside can be strings, numbers, or booleans.",
+            )
+            .into());
+        }
+    }
+    Ok(())
 }

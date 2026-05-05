@@ -185,6 +185,46 @@ Claude Code will surface the OAuth flow in your terminal on first use.
 | `drive_list_permissions` | List sharing entries |
 | `drive_delete_permission` | Remove a sharing entry by ID |
 
+## Error contract
+
+Every error returned by the server includes a structured `data` payload alongside the human-readable `message`. Agents can switch on `category` and `retryable` programmatically without parsing the message string.
+
+```json
+{
+  "code": -32002,
+  "message": "gmail message not found: 18a3b…",
+  "data": {
+    "category": "not_found",
+    "retryable": false,
+    "service": "gmail",
+    "http_status": 404,
+    "upstream_reason": "notFound",
+    "resource_kind": "message",
+    "resource_id": "18a3b…",
+    "hint": "Use gmail_search_threads or gmail_list_messages to discover valid message IDs."
+  }
+}
+```
+
+| `category` | `retryable` | When | What the agent should do |
+|---|---|---|---|
+| `invalid_input` | no | Tool args malformed (missing field, wrong type, mutually exclusive options, no recipients, etc.) | Read `hint`, fix args, retry |
+| `not_found` | no | Resource ID does not exist or is not visible to this account | Read `resource_kind` + `hint`, call the right discovery tool, retry with a new ID |
+| `auth_required` | no | User must re-authorize (refresh token revoked, account not registered with this server) | Surface `reconnect_url` to the user; this is unrecoverable from the agent's side |
+| `auth_invalid` | no | JWT itself is bad (expired, wrong signature, audience mismatch) | Re-run the OAuth flow at `/authorize` |
+| `rate_limited` | **yes** | Google rate limit hit | Back off (exponential: 250ms → 1s → 4s) and retry |
+| `permission_denied` | no | Account lacks permission for this resource | Don't retry; surface to the user |
+| `transient` | **yes** | Network blip / Google 5xx | Retry once or twice with a 1–5s delay |
+| `upstream` | no | Uncategorized upstream response | Inspect `http_status` + `message` |
+| `internal` | no | Server-side bug | Retry won't help |
+
+**Agent recovery patterns:**
+
+- Loop with `gmail_send` and a malformed recipient → `invalid_input` → fix the email format, retry.
+- `gmail_get_message` with stale ID → `not_found` with `resource_kind: "message"` → call `gmail_search_threads` to refresh, retry.
+- Any tool returns `rate_limited` → sleep and retry; backoff is the agent's responsibility.
+- Any tool returns `auth_required` with `reconnect_url` → ask the user to reconnect the MCP server; do not retry the same tool.
+
 ## Caveats
 
 - **Unverified app cap.** Until your OAuth client is verified by Google, only **test users** (added in the GCP Console) can authorize, and the app is hard-capped at 100 users for its lifetime. `gmail.modify`, `drive`, and `spreadsheets` are all **restricted/sensitive scopes** — verification for the full set requires a [CASA assessment](https://cloud.google.com/security/compliance/casa) (2–6 weeks, plus privacy policy URL, terms of service URL, demo video).

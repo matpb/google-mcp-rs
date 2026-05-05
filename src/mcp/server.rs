@@ -7,10 +7,10 @@ use rmcp::handler::server::tool::ToolRouter;
 use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::{ErrorData, ServerHandler, tool_handler};
 
-use crate::credentials::{CredentialsError, resolve_google};
-use crate::google::gmail::{GmailClient, GmailError};
+use crate::credentials::resolve_google;
+use crate::errors::to_mcp;
+use crate::google::gmail::GmailClient;
 use crate::google::session::GoogleAccountSession;
-use crate::mime::MimeError;
 use crate::state::AppState;
 
 #[derive(Clone)]
@@ -38,7 +38,7 @@ impl GoogleMcp {
             &self.state.session_cache,
         )
         .await
-        .map_err(creds_to_error)
+        .map_err(to_mcp)
     }
 
     pub(crate) async fn gmail_for(&self, parts: &Parts) -> Result<GmailClient, ErrorData> {
@@ -48,23 +48,6 @@ impl GoogleMcp {
             session.access_token,
         ))
     }
-}
-
-pub(crate) fn creds_to_error(e: CredentialsError) -> ErrorData {
-    use CredentialsError::*;
-    match e {
-        Missing | Malformed => ErrorData::invalid_request(e.to_string(), None),
-        Jwt(_) => ErrorData::invalid_request(e.to_string(), None),
-        Session(s) => ErrorData::invalid_request(s.to_string(), None),
-    }
-}
-
-pub(crate) fn gmail_to_error(e: GmailError) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
-}
-
-pub(crate) fn mime_to_error(e: MimeError) -> ErrorData {
-    ErrorData::invalid_params(e.to_string(), None)
 }
 
 #[tool_handler(router = self.tool_router)]

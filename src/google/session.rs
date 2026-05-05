@@ -86,7 +86,9 @@ impl SessionCache {
             return Ok(s);
         }
 
-        // Slow path: hit Google.
+        // Slow path: hit Google. Debug-level traces here help diagnose
+        // "account_not_found" reports without leaking the access token.
+        tracing::debug!(google_sub, "session cache miss; fetching from DB");
         let refresh_token =
             accounts::get_refresh_token(&self.state.db, &self.state.storage_key, google_sub)
                 .await?

@@ -8,11 +8,12 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 use serde_json::{Value, json};
 
+use crate::errors::{McpError, to_mcp};
 use crate::google::gmail::{
     CreateLabel, GmailClient, GmailError, LabelColor, ModifyLabels, UpdateLabel,
 };
 use crate::mcp::params::*;
-use crate::mcp::server::{GoogleMcp, gmail_to_error, mime_to_error};
+use crate::mcp::server::GoogleMcp;
 use crate::mime::{Compose, ReplyContext, ResolvedAttachment};
 
 #[tool_router(router = gmail_router, vis = "pub(crate)")]
@@ -31,7 +32,7 @@ impl GoogleMcp {
     ) -> Result<String, ErrorData> {
         let session = self.resolve_session(&parts).await?;
         let client = GmailClient::new((*self.state.http).clone(), &session.access_token);
-        let profile = client.profile().await.map_err(gmail_to_error)?;
+        let profile = client.profile().await.map_err(to_mcp)?;
         let out = json!({
             "email": session.email,
             "scopes": session.scopes,
@@ -62,7 +63,7 @@ impl GoogleMcp {
                 &p.label_ids,
             )
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -79,7 +80,7 @@ impl GoogleMcp {
         let v = client
             .get_thread(&p.id, p.format.as_deref())
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -128,7 +129,7 @@ impl GoogleMcp {
                 p.include_spam_trash,
             )
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -145,7 +146,7 @@ impl GoogleMcp {
         let v = client
             .get_message(&p.id, p.format.as_deref(), &p.metadata_headers)
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -166,7 +167,7 @@ impl GoogleMcp {
         let msg = client
             .get_message(&p.message_id, Some("full"), &[])
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(to_mcp)?;
         let mut attachments: Vec<Value> = vec![];
         if let Some(payload) = msg.get("payload") {
             walk_attachments(payload, &mut attachments);
@@ -187,7 +188,7 @@ impl GoogleMcp {
         let v = client
             .get_attachment(&p.message_id, &p.attachment_id)
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -208,7 +209,7 @@ impl GoogleMcp {
         let v = client
             .list_drafts(p.q.as_deref(), p.max_results, p.page_token.as_deref())
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -225,7 +226,7 @@ impl GoogleMcp {
         let v = client
             .get_draft(&p.id, p.format.as_deref())
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -244,7 +245,7 @@ impl GoogleMcp {
         let v = client
             .create_draft(&raw, thread_id.as_deref())
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -263,7 +264,7 @@ impl GoogleMcp {
         let v = client
             .update_draft(&p.id, &raw, thread_id.as_deref())
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -277,7 +278,7 @@ impl GoogleMcp {
         Parameters(p): Parameters<GmailDeleteDraftParams>,
     ) -> Result<String, ErrorData> {
         let client = self.gmail_for(&parts).await?;
-        let v = client.delete_draft(&p.id).await.map_err(gmail_to_error)?;
+        let v = client.delete_draft(&p.id).await.map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -291,7 +292,7 @@ impl GoogleMcp {
         Parameters(p): Parameters<GmailSendDraftParams>,
     ) -> Result<String, ErrorData> {
         let client = self.gmail_for(&parts).await?;
-        let v = client.send_draft(&p.id).await.map_err(gmail_to_error)?;
+        let v = client.send_draft(&p.id).await.map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -314,7 +315,7 @@ impl GoogleMcp {
         let v = client
             .send_message(&raw, thread_id.as_deref())
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -331,7 +332,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<String, ErrorData> {
         let client = self.gmail_for(&parts).await?;
-        let v = client.list_labels().await.map_err(gmail_to_error)?;
+        let v = client.list_labels().await.map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -345,7 +346,7 @@ impl GoogleMcp {
         Parameters(p): Parameters<GmailGetLabelParams>,
     ) -> Result<String, ErrorData> {
         let client = self.gmail_for(&parts).await?;
-        let v = client.get_label(&p.id).await.map_err(gmail_to_error)?;
+        let v = client.get_label(&p.id).await.map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -365,7 +366,7 @@ impl GoogleMcp {
             message_list_visibility: p.message_list_visibility,
             color: p.color.map(label_color_owned),
         };
-        let v = client.create_label(&body).await.map_err(gmail_to_error)?;
+        let v = client.create_label(&body).await.map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -385,10 +386,7 @@ impl GoogleMcp {
             message_list_visibility: p.message_list_visibility,
             color: p.color.map(label_color_owned),
         };
-        let v = client
-            .update_label(&p.id, &body)
-            .await
-            .map_err(gmail_to_error)?;
+        let v = client.update_label(&p.id, &body).await.map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -402,7 +400,7 @@ impl GoogleMcp {
         Parameters(p): Parameters<GmailDeleteLabelParams>,
     ) -> Result<String, ErrorData> {
         let client = self.gmail_for(&parts).await?;
-        let v = client.delete_label(&p.id).await.map_err(gmail_to_error)?;
+        let v = client.delete_label(&p.id).await.map_err(to_mcp)?;
         Ok(v.to_string())
     }
 
@@ -412,13 +410,20 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_modify_labels",
-        description = "Add/remove label IDs on a single message OR thread. Pass `target=\"message\"` or `target=\"thread\"` and the corresponding ID."
+        description = "Add/remove label IDs on a single message OR thread. Pass `target=\"message\"` or `target=\"thread\"` and the corresponding ID. At least one of `add_label_ids` / `remove_label_ids` must be non-empty."
     )]
     async fn gmail_modify_labels(
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<GmailModifyLabelsParams>,
     ) -> Result<String, ErrorData> {
+        if p.add_label_ids.is_empty() && p.remove_label_ids.is_empty() {
+            return Err(McpError::invalid_input(
+                "no-op: at least one of `add_label_ids` / `remove_label_ids` must be non-empty",
+            )
+            .with_hint("Pass label IDs from gmail_list_labels in either array.")
+            .into());
+        }
         let client = self.gmail_for(&parts).await?;
         let body = ModifyLabels {
             add_label_ids: p.add_label_ids,
@@ -428,7 +433,7 @@ impl GoogleMcp {
             LabelTarget::Message => client.modify_message(&p.id, &body).await,
             LabelTarget::Thread => client.modify_thread(&p.id, &body).await,
         }
-        .map_err(gmail_to_error)?;
+        .map_err(|e| reclassify_not_found(e, p.target.as_kind(), &p.id))?;
         Ok(v.to_string())
     }
 
@@ -590,6 +595,15 @@ async fn build_outgoing_message(
     from_email: &str,
     p: GmailComposeParams,
 ) -> Result<(String, Option<String>), ErrorData> {
+    if p.body_text.as_deref().unwrap_or("").is_empty()
+        && p.body_html.as_deref().unwrap_or("").is_empty()
+    {
+        return Err(McpError::invalid_input(
+            "compose body is empty: pass at least one of `body_text` or `body_html`",
+        )
+        .with_hint("Empty messages are valid RFC 5322 but rarely useful — supply text and/or HTML.")
+        .into());
+    }
     let mut reply: Option<ReplyContext> = None;
     let mut thread_id = p.thread_id.clone();
 
@@ -605,7 +619,7 @@ async fn build_outgoing_message(
                 ],
             )
             .await
-            .map_err(gmail_to_error)?;
+            .map_err(|e| reclassify_not_found(e, "message", reply_id))?;
 
         if thread_id.is_none()
             && let Some(tid) = metadata.get("threadId").and_then(|v| v.as_str())
@@ -658,8 +672,9 @@ async fn build_outgoing_message(
     // Resolve attachments first (fail fast on bad inputs).
     let mut attachments: Vec<ResolvedAttachment> = Vec::with_capacity(p.attachments.len());
     for a in p.attachments {
-        attachments.push(ResolvedAttachment::from_input(a).map_err(mime_to_error)?);
+        attachments.push(ResolvedAttachment::from_input(a).map_err(to_mcp)?);
     }
+    attachments_total_size_check(&attachments)?;
 
     let compose_req = Compose {
         from: crate::mime::Recipient {
@@ -675,8 +690,45 @@ async fn build_outgoing_message(
         attachments,
         reply,
     };
-    let raw = crate::mime::compose_for_gmail(compose_req).map_err(mime_to_error)?;
+    let raw = crate::mime::compose_for_gmail(compose_req).map_err(to_mcp)?;
     Ok((raw, thread_id))
+}
+
+/// Check the total attachment payload up front so we can return a clear
+/// error before we waste time encoding base64 and hitting Gmail.
+fn attachments_total_size_check(attachments: &[ResolvedAttachment]) -> Result<(), ErrorData> {
+    let total: usize = attachments.iter().map(|a| a.bytes.len()).sum();
+    if total > crate::mime::MAX_MESSAGE_BYTES {
+        let mb = total as f64 / 1_048_576.0;
+        return Err(McpError::invalid_input(format!(
+            "attachments total {mb:.1} MB which exceeds the 24 MB cap"
+        ))
+        .with_hint(
+            "Reduce attachment count or size. Gmail's hard limit is 25 MB; we cap at 24 MB to leave room for MIME framing.",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Re-classify a Gmail 404 into a typed `NotFound` with the resource kind
+/// and ID set so agents know which input to fix.
+fn reclassify_not_found(e: GmailError, kind: &'static str, id: &str) -> ErrorData {
+    if let GmailError::Api { status, .. } = &e
+        && status.as_u16() == 404
+    {
+        return McpError::not_found(kind, id, "gmail").into();
+    }
+    to_mcp(e)
+}
+
+impl LabelTarget {
+    fn as_kind(self) -> &'static str {
+        match self {
+            LabelTarget::Message => "message",
+            LabelTarget::Thread => "thread",
+        }
+    }
 }
 
 #[allow(dead_code)]
