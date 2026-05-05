@@ -584,3 +584,132 @@ pub struct DocsBatchUpdateParams {
     /// See https://developers.google.com/docs/api/reference/rest/v1/documents/request
     pub body: serde_json::Value,
 }
+
+/// A character index range. End is exclusive (Docs convention).
+/// All indexes count UTF-16 code units (matches what `docs_get` returns).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct DocsRange {
+    pub start_index: u32,
+    pub end_index: u32,
+}
+
+/// Subset of Docs `TextStyle` exposed to agents. Pass only the fields you
+/// want to set; omitted fields are left untouched.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct DocsTextStyleSpec {
+    #[serde(default)]
+    pub bold: Option<bool>,
+    #[serde(default)]
+    pub italic: Option<bool>,
+    #[serde(default)]
+    pub underline: Option<bool>,
+    #[serde(default)]
+    pub strikethrough: Option<bool>,
+    /// Font size in points (e.g. 14).
+    #[serde(default)]
+    pub font_size_pt: Option<f64>,
+    /// Font family name (e.g. "Roboto", "Roboto Mono", "Arial").
+    #[serde(default)]
+    pub font_family: Option<String>,
+    /// Foreground (text) color as `#rrggbb` hex.
+    #[serde(default)]
+    pub foreground_color_hex: Option<String>,
+    /// Background (highlight) color as `#rrggbb` hex.
+    #[serde(default)]
+    pub background_color_hex: Option<String>,
+    /// Hyperlink URL. Pass an empty string to remove an existing link.
+    #[serde(default)]
+    pub link_url: Option<String>,
+    /// `SUBSCRIPT`, `SUPERSCRIPT`, or `NONE`.
+    #[serde(default)]
+    pub baseline_offset: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsInsertStyledParams {
+    pub document_id: String,
+    pub text: String,
+    /// Where to insert. Omit to append at the end of the body.
+    #[serde(default)]
+    pub at_index: Option<u32>,
+    /// Optional text styling applied to ALL inserted text. Use
+    /// `docs_format_text` to style a substring after the fact.
+    #[serde(default)]
+    pub text_style: Option<DocsTextStyleSpec>,
+    /// Optional named paragraph style: `NORMAL_TEXT` (default), `TITLE`,
+    /// `SUBTITLE`, `HEADING_1`, `HEADING_2`, `HEADING_3`, `HEADING_4`,
+    /// `HEADING_5`, `HEADING_6`. Applied to the paragraph(s) containing
+    /// the inserted text.
+    #[serde(default)]
+    pub paragraph_style: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsFormatTextParams {
+    pub document_id: String,
+    /// Style this exact range. Mutually exclusive with `match`.
+    #[serde(default)]
+    pub range: Option<DocsRange>,
+    /// Find every occurrence of this string and style each match.
+    /// Mutually exclusive with `range`. Matches that span multiple
+    /// `textRun` boundaries (e.g. across a bold↔normal style edge) are
+    /// not detected — split your search if necessary.
+    #[serde(default, rename = "match")]
+    pub match_text: Option<String>,
+    /// Default false (case-insensitive) when matching by text.
+    #[serde(default)]
+    pub match_case: bool,
+    /// Text styling to apply.
+    #[serde(default)]
+    pub text_style: Option<DocsTextStyleSpec>,
+    /// Optional paragraph styling (named style type).
+    #[serde(default)]
+    pub paragraph_style: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsMakeListParams {
+    pub document_id: String,
+    /// Range covering the paragraphs to listify.
+    pub range: DocsRange,
+    /// Convenience: `bullet` (default) or `numbered`. Ignored when
+    /// `bullet_preset` is provided.
+    #[serde(default)]
+    pub style: Option<String>,
+    /// Override the preset directly. Common values:
+    /// `BULLET_DISC_CIRCLE_SQUARE`, `BULLET_ARROW_DIAMOND_DISC`,
+    /// `BULLET_CHECKBOX`, `NUMBERED_DECIMAL_ALPHA_ROMAN`,
+    /// `NUMBERED_DECIMAL_NESTED`. See
+    /// https://developers.google.com/docs/api/reference/rest/v1/documents/request#bulletglyphpreset
+    #[serde(default)]
+    pub bullet_preset: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsInsertTableParams {
+    pub document_id: String,
+    pub rows: u32,
+    pub columns: u32,
+    /// Where to insert. Omit to append at the end of the body.
+    #[serde(default)]
+    pub at_index: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsInsertImageParams {
+    pub document_id: String,
+    /// Public HTTPS URL for the image (PNG, JPEG, or GIF; up to 50 MB
+    /// and 25 megapixels). Drive image URLs work if the file is shared
+    /// publicly.
+    pub image_url: String,
+    /// Optional explicit width in points (e.g. 200). If omitted, Docs
+    /// uses the image's natural size.
+    #[serde(default)]
+    pub width_pt: Option<f64>,
+    /// Optional explicit height in points.
+    #[serde(default)]
+    pub height_pt: Option<f64>,
+    /// Where to insert. Omit to append at the end of the body.
+    #[serde(default)]
+    pub at_index: Option<u32>,
+}

@@ -2,7 +2,7 @@
 
 A multi-tenant **Model Context Protocol** server for **Google Workspace**, written in Rust. Built around streamable HTTP transport with full **OAuth 2.1** so it plugs straight into Claude.ai, Claude Code, ChatGPT custom connectors, Cursor, or any MCP client that speaks the 2025-11-25 authorization spec.
 
-> **Status:** v0.3.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (7) live. **57 tools** total.
+> **Status:** v0.4.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) live. **62 tools** total.
 
 ## Why
 
@@ -167,8 +167,9 @@ Claude Code will surface the OAuth flow in your terminal on first use.
 | `sheets_add_sheet` | Convenience: add a new tab |
 | `sheets_delete_sheet` | Convenience: remove a tab by `sheetId` |
 
-### Docs (7)
+### Docs (12)
 
+**Read & basic write:**
 | Tool | Purpose |
 |---|---|
 | `docs_create` | Create an empty Google Doc with a title |
@@ -177,7 +178,22 @@ Claude Code will surface the OAuth flow in your terminal on first use.
 | `docs_append_text` | Append plain text to the end of the document |
 | `docs_insert_text` | Insert plain text at a specific character index |
 | `docs_replace_text` | Find every occurrence of a string and replace it (case-sensitive optional) |
-| `docs_batch_update` | Power-user: raw `requests[]` passthrough for formatting, headings, tables, named ranges, sections, etc. |
+
+**Formatting helpers** (hide the index/schema math):
+| Tool | Purpose |
+|---|---|
+| `docs_insert_styled` | Insert text with **text styling** (bold, italic, underline, strikethrough, font size, font family, foreground/background `#rrggbb` color, link, baseline) and/or **paragraph styling** (HEADING_1…6, TITLE, SUBTITLE, NORMAL_TEXT). Append by default; pass `at_index` for a specific position. Returns the inserted range so chained ops can keep going |
+| `docs_format_text` | Apply text and/or paragraph styling. Pass EITHER `range: {start_index, end_index}` for an exact slice OR `match: "..."` to style every occurrence (case-insensitive by default). Returns the list of ranges affected |
+| `docs_make_list` | Convert paragraphs in a range to a bulleted or numbered list. `style: "bullet"` (default) or `"numbered"`, or pass `bullet_preset` directly (e.g. `BULLET_CHECKBOX`, `NUMBERED_DECIMAL_NESTED`) |
+| `docs_insert_table` | Insert an empty table (`rows` × `columns`) at a position. Capped at 100 rows × 20 columns per Google's API limits |
+| `docs_insert_image` | Insert an inline image from a public HTTPS URL with optional explicit `width_pt` / `height_pt`. PNG / JPEG / GIF only |
+
+**Escape hatch:**
+| Tool | Purpose |
+|---|---|
+| `docs_batch_update` | Raw `requests[]` passthrough for everything else (named ranges, section breaks, custom paragraph spacing, conditional formatting, etc.) |
+
+> **Indexes are UTF-16 code units** (matches what `docs_get` returns). For ASCII text this equals byte length; for emoji or non-BMP characters one Unicode scalar can occupy two units.
 
 ### Drive (14)
 
