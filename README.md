@@ -11,7 +11,7 @@ The first-party Google Workspace MCP server is missing fundamentals (you cannot 
 - **Full Gmail / Sheets / Drive / Docs / Calendar surface** — 76 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), and Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence).
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256.
-- **Streamable HTTP only** — no stdio. Designed to live behind a tunnel, talk to remote MCP clients.
+- **Streamable HTTP only** — no stdio. One running instance serves many MCP clients (multiple Claude Code instances, Claude.ai, ChatGPT custom connectors) and many Google accounts simultaneously.
 - **One binary, distroless image** — small surface, no runtime dependencies.
 
 ## Architecture overview
@@ -44,6 +44,19 @@ MCP client → /mcp Authorization: Bearer <MCP JWT>
 ```
 
 State is threaded MCP-client → Google → callback via single-use opaque tokens stored in SQLite (5-minute TTL). MCP JWTs are HS256 signed, bound to the user's Google `sub`, audience-scoped to `${BASE_URL}/mcp`.
+
+## Deployment posture
+
+This server is designed to be **self-hosted on your own machine** — typically one instance per workstation, listening on `127.0.0.1`, serving multiple MCP clients and multiple Google accounts at once. The quick-start below walks you through exactly that.
+
+Public-internet deployment is *possible* — the OAuth flow, crypto (AES-256-GCM with AAD-bound `sub`, Argon2id-hashed client secrets, S256 PKCE, single-use codes with 5-minute TTL), and per-tenant isolation are sound — but going public adds attack surface this codebase does not yet cover:
+
+- **No rate limiting** on `/oauth/register`, `/oauth/token`, `/authorize`, or `/mcp`. Brute-force and DoS are unmitigated.
+- **No per-user JWT revocation.** Tokens have a 30-day lifetime; the only cut-off is rotating `JWT_SECRET`, which logs everyone out.
+- **Audience binding skipped on `Host: localhost`** for local-dev convenience. Public instances must enforce that the token's `aud` claim matches the deployed `BASE_URL` regardless of inbound `Host`.
+- **No network egress policy** on the container — a compromised process could reach anywhere on the internet.
+
+If those gaps don't fit your threat model, fork it. The architecture is set up to make those additions straightforward, and PRs are welcome.
 
 ## Quick start (local development)
 
@@ -86,24 +99,18 @@ docker compose up --build
 
 The server listens on `http://0.0.0.0:8433` by default. `/health` returns `ok`. `/mcp` requires a valid bearer token.
 
-### 4. Connect an MCP client
+### 4. Connect Claude Code
 
-For **Claude.ai** (or any remote MCP client with OAuth support): add a custom connector pointing at `${BASE_URL}/mcp`. The client will discover our authorization server, do dynamic client registration, then walk you through the Google consent screen. Once authorized, the Gmail tools appear in the client's tool list.
+Add the server once per Google account you want to use. Each entry triggers its own OAuth dance, so you pick the matching Google account in the browser tab when prompted.
 
-For **Claude Code**, see `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "google": {
-      "type": "http",
-      "url": "http://localhost:8433/mcp"
-    }
-  }
-}
+```bash
+claude mcp add --transport http --scope user google-personal http://localhost:8433/mcp
+claude mcp add --transport http --scope user google-work     http://localhost:8433/mcp
 ```
 
-Claude Code will surface the OAuth flow in your terminal on first use.
+Then in any Claude Code session run `/mcp` and authenticate each entry. The JWTs land in Claude Code's credential vault; the server is multi-tenant and keys on Google `sub`, so one running instance handles both accounts. JWT lifetime is 30 days; access tokens refresh transparently every hour.
+
+For **Claude.ai / ChatGPT custom connectors / Cursor**, add a custom connector pointing at `http://localhost:8433/mcp` — these clients have to support local-loopback URLs and the MCP 2025-11-25 OAuth flow, which not all of them do yet.
 
 ## Configuration
 
