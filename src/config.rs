@@ -1,6 +1,8 @@
 use std::fmt;
 use std::net::IpAddr;
 
+use crate::domain::{self, Domain};
+
 /// Operator-supplied configuration loaded from the environment at startup.
 ///
 /// The `Debug` impl deliberately redacts every secret-bearing field. Never
@@ -16,6 +18,7 @@ pub struct ServerConfig {
     pub storage_encryption_key: [u8; 32],
     pub database_url: String,
     pub cors_allow_localhost: bool,
+    pub enabled_domains: Vec<Domain>,
 }
 
 impl ServerConfig {
@@ -61,6 +64,9 @@ impl ServerConfig {
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
 
+        let enabled_domains = domain::parse_enabled(optional_env("ENABLED_DOMAINS").as_deref())
+            .map_err(ConfigError::InvalidDomain)?;
+
         Ok(Self {
             host,
             port,
@@ -71,6 +77,7 @@ impl ServerConfig {
             storage_encryption_key,
             database_url,
             cors_allow_localhost,
+            enabled_domains,
         })
     }
 
@@ -112,6 +119,8 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("invalid env var: {0}")]
     Invalid(&'static str),
+    #[error("invalid env var ENABLED_DOMAINS: {0}")]
+    InvalidDomain(String),
 }
 
 impl fmt::Debug for ServerConfig {
@@ -126,6 +135,7 @@ impl fmt::Debug for ServerConfig {
             .field("storage_encryption_key", &Redacted)
             .field("database_url", &self.database_url)
             .field("cors_allow_localhost", &self.cors_allow_localhost)
+            .field("enabled_domains", &self.enabled_domains)
             .finish()
     }
 }

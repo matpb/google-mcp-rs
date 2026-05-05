@@ -14,16 +14,6 @@ use super::GoogleOAuthError;
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
-pub const DEFAULT_SCOPES: &[&str] = &[
-    "openid",
-    "email",
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/documents",
-    "https://www.googleapis.com/auth/calendar",
-];
-
 pub struct GoogleOAuthClient {
     pub client_id: String,
     pub client_secret: String,
@@ -236,11 +226,12 @@ mod tests {
 
     #[test]
     fn build_url_includes_required_params() {
+        let scopes = crate::domain::google_scopes(&crate::domain::Domain::ALL);
         let client = GoogleOAuthClient::new(
             "cid",
             "csecret",
             "http://localhost:8433/oauth/google/callback",
-            DEFAULT_SCOPES.iter().map(|s| s.to_string()).collect(),
+            scopes,
             reqwest::Client::new(),
         );
         let url = client.build_authorize_url("state-abc", None);

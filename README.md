@@ -125,7 +125,25 @@ For **Claude.ai / ChatGPT custom connectors / Cursor**, add a custom connector p
 | `MCP_HOST` | no | `0.0.0.0` | Bind address |
 | `MCP_PORT` | no | `8433` | Listen port |
 | `CORS_ALLOW_LOCALHOST` | no | `false` | Allow `http://localhost:*` in CORS (dev only) |
+| `ENABLED_DOMAINS` | no | all five | Comma-separated subset of `gmail,sheets,drive,docs,calendar`. Filters both the MCP tool surface and the OAuth scopes requested from Google. Unset = all five. See [Scoping the surface](#scoping-the-surface) below. |
 | `RUST_LOG` | no | `google_mcp=info,rmcp=warn,reqwest=warn` | Tracing filter — keep `reqwest` ≤ `warn` to avoid logging URLs with PII |
+
+## Scoping the surface
+
+By default, the server exposes all 76 tools across all five Workspace domains and asks Google for the matching scope set during consent. For deployments that only need part of the surface, set `ENABLED_DOMAINS` to a comma-separated subset:
+
+```bash
+ENABLED_DOMAINS=gmail            # Gmail-only: 25 tools, gmail.modify scope
+ENABLED_DOMAINS=gmail,calendar   # email + calendaring: 39 tools
+ENABLED_DOMAINS=docs,drive       # document workflow: 26 tools
+```
+
+Two things shrink in lockstep:
+
+1. **Tool surface.** Only the listed domains' `tool_router` impls compose into the MCP server. The rest of the tools simply do not exist on this instance — they don't show up in `tools/list`, they don't burn agent context tokens, they can't be called.
+2. **OAuth scopes.** The consent screen asks Google for `openid`, `email`, plus only the scopes for the listed domains. A user authorizing a Gmail-only deployment never grants the server access to their Drive or Calendar.
+
+Domain names are case-insensitive and whitespace-trimmed (`Gmail`, `GMAIL`, `gmail ` all parse the same). Unset, empty, or `ENABLED_DOMAINS=` reverts to the full surface (backwards-compatible default). An unknown domain name fails fast at startup with the valid list in the error message.
 
 ## Tools
 

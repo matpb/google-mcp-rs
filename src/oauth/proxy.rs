@@ -17,7 +17,8 @@ use http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::oauth::google::{DEFAULT_SCOPES, parse_id_token};
+use crate::domain;
+use crate::oauth::google::parse_id_token;
 use crate::oauth::jwt::{Claims, TOKEN_LIFETIME_SECS, now_secs, sign as sign_jwt};
 use crate::oauth::pkce::verify_s256;
 use crate::oauth::{GoogleOAuthError, oauth_err};
@@ -91,7 +92,7 @@ pub async fn protected_resource_metadata(
         resource: format!("{iss}/mcp"),
         authorization_servers: vec![iss],
         bearer_methods_supported: vec!["header".to_string()],
-        scopes_supported: DEFAULT_SCOPES.iter().map(|s| (*s).to_string()).collect(),
+        scopes_supported: domain::google_scopes(&state.config.enabled_domains),
     })
 }
 
@@ -111,7 +112,7 @@ pub async fn authorization_server_metadata(
             "none".to_string(),
         ],
         code_challenge_methods_supported: vec!["S256".to_string()],
-        scopes_supported: DEFAULT_SCOPES.iter().map(|s| (*s).to_string()).collect(),
+        scopes_supported: domain::google_scopes(&state.config.enabled_domains),
         issuer: iss,
     })
 }
@@ -411,7 +412,7 @@ pub async fn google_callback(
         .scope
         .as_deref()
         .map(|s| s.split_whitespace().map(str::to_string).collect())
-        .unwrap_or_else(|| DEFAULT_SCOPES.iter().map(|s| (*s).to_string()).collect());
+        .unwrap_or_else(|| domain::google_scopes(&state.config.enabled_domains));
     let email = id.email.clone().unwrap_or_default();
 
     accounts::upsert(

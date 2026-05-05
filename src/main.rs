@@ -1,6 +1,7 @@
 mod auth_gate;
 mod config;
 mod credentials;
+mod domain;
 mod errors;
 mod google;
 mod mcp;
@@ -29,7 +30,7 @@ use config::ServerConfig;
 use google::http as google_http;
 use google::session::SessionCache;
 use mcp::server::GoogleMcp;
-use oauth::google::{DEFAULT_SCOPES, GoogleOAuthClient};
+use oauth::google::GoogleOAuthClient;
 use oauth::proxy;
 use state::AppState;
 use storage::{Db, codes::sweep_expired};
@@ -67,7 +68,7 @@ async fn main() {
         cfg.google_client_id.clone(),
         cfg.google_client_secret.clone(),
         cfg.google_redirect_uri(),
-        DEFAULT_SCOPES.iter().map(|s| (*s).to_string()).collect(),
+        domain::google_scopes(&cfg.enabled_domains),
         (*http).clone(),
     ));
 
