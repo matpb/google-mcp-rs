@@ -1,0 +1,12 @@
+/target
+.env
+.env.local
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+.DS_Store
+
+# Local-only operator secrets — never committed.
+client_secret*.json
+service-account*.json

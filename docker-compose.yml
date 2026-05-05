@@ -1,0 +1,25 @@
+# google-mcp — multi-tenant Google Workspace MCP server.
+# All operator secrets are read from environment variables (see .env.example).
+# Per-user Google refresh tokens are stored encrypted in the SQLite database.
+services:
+  google-mcp:
+    build: .
+    container_name: google-mcp
+    restart: unless-stopped
+    ports:
+      - "${MCP_PORT:-8433}:8433"
+    environment:
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8433"
+      BASE_URL: "${BASE_URL}"
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET}"
+      JWT_SECRET: "${JWT_SECRET}"
+      STORAGE_ENCRYPTION_KEY: "${STORAGE_ENCRYPTION_KEY}"
+      DATABASE_URL: "/data/google-mcp.db"
+      RUST_LOG: "${RUST_LOG:-google_mcp=info,rmcp=warn,reqwest=warn}"
+    volumes:
+      - google-mcp-data:/data
+
+volumes:
+  google-mcp-data:
