@@ -18,6 +18,8 @@ pub const DEFAULT_SCOPES: &[&str] = &[
     "openid",
     "email",
     "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ];
 
 pub struct GoogleOAuthClient {

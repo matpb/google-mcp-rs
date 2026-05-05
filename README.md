@@ -2,13 +2,13 @@
 
 A multi-tenant **Model Context Protocol** server for **Google Workspace**, written in Rust. Built around streamable HTTP transport with full **OAuth 2.1** so it plugs straight into Claude.ai, Claude Code, ChatGPT custom connectors, Cursor, or any MCP client that speaks the 2025-11-25 authorization spec.
 
-> **Status:** early development. Gmail tools land first. Sheets and Drive follow.
+> **Status:** v0.2.0 — Gmail (25 tools) + Sheets (11) + Drive (14) live. **50 tools** total.
 
 ## Why
 
 The first-party Google Workspace MCP server is missing fundamentals (you cannot send an email from it). Existing community servers are Python or single-tenant. `google-mcp-rs` aims to be the Rust server you actually want to deploy:
 
-- **Full Gmail surface** — search, threads, drafts, send (with reply threading and attachments), labels, organize.
+- **Full Gmail / Sheets / Drive surface** — 50 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), and Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash).
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256.
 - **Streamable HTTP only** — no stdio. Designed to live behind a tunnel, talk to remote MCP clients.
@@ -52,9 +52,14 @@ State is threaded MCP-client → Google → callback via single-use opaque token
 In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
 
 1. Pick or create a GCP project.
-2. Enable the **Gmail API** (Phase 2 will additionally need Sheets / Drive).
+2. Enable the **Gmail API**, **Sheets API**, and **Drive API**.
 3. **OAuth consent screen** → External, app name `google-mcp` (or whatever you want users to see), user support email, developer email.
-4. Add scopes: `openid`, `email`, `https://www.googleapis.com/auth/gmail.modify`.
+4. Add scopes:
+   - `openid`
+   - `email`
+   - `https://www.googleapis.com/auth/gmail.modify`
+   - `https://www.googleapis.com/auth/spreadsheets`
+   - `https://www.googleapis.com/auth/drive`
 5. Add yourself + any beta users to the **Test users** list (until the app is verified, only test users can authorize — see [Caveats](#caveats)).
 6. **Credentials** → **Create credentials** → **OAuth 2.0 Client ID** → **Web application**.
 7. Authorized redirect URI: `${BASE_URL}/oauth/google/callback` (e.g. `http://localhost:8433/oauth/google/callback` for dev).
@@ -113,7 +118,9 @@ Claude Code will surface the OAuth flow in your terminal on first use.
 | `CORS_ALLOW_LOCALHOST` | no | `false` | Allow `http://localhost:*` in CORS (dev only) |
 | `RUST_LOG` | no | `google_mcp=info,rmcp=warn,reqwest=warn` | Tracing filter — keep `reqwest` ≤ `warn` to avoid logging URLs with PII |
 
-## Tools (Gmail — Phase 1)
+## Tools
+
+### Gmail (25)
 
 | Tool | Purpose |
 |---|---|
@@ -143,9 +150,44 @@ Claude Code will surface the OAuth flow in your terminal on first use.
 | `gmail_trash` | Move messages to trash |
 | `gmail_get_profile` | Return the connected account email and granted scopes |
 
+### Sheets (11)
+
+| Tool | Purpose |
+|---|---|
+| `sheets_create` | Create a new spreadsheet (optionally with named tabs + locale + time zone) |
+| `sheets_get` | Get a spreadsheet's metadata (or specific A1 ranges with cell data) |
+| `sheets_get_values` | Read values from an A1 range |
+| `sheets_batch_get_values` | Read values from multiple A1 ranges in one call |
+| `sheets_update_values` | Write a 2-D array of values into a range (`RAW` or `USER_ENTERED`) |
+| `sheets_append_values` | Append rows to a table-shaped range |
+| `sheets_clear_values` | Clear values in a range (formatting preserved) |
+| `sheets_batch_update_values` | Write to multiple ranges in one API call |
+| `sheets_batch_update` | Schema-level batch update — add/delete sheets, formatting, conditional formatting, charts, banding (raw `requests[]` passthrough) |
+| `sheets_add_sheet` | Convenience: add a new tab |
+| `sheets_delete_sheet` | Convenience: remove a tab by `sheetId` |
+
+### Drive (14)
+
+| Tool | Purpose |
+|---|---|
+| `drive_list_files` | Search/list files with Drive query syntax |
+| `drive_get_file` | Fetch file metadata |
+| `drive_create_folder` | Create a folder (optionally nested) |
+| `drive_create_file` | Upload a file (multipart, ≤ ~5 MB content) |
+| `drive_update_metadata` | Rename, re-describe, move (add/remove parents), star |
+| `drive_update_content` | Replace a file's binary content |
+| `drive_download_file` | Download bytes (returns base64) |
+| `drive_export_file` | Export a Google Doc/Sheet/Slide to PDF/CSV/XLSX/markdown/etc. |
+| `drive_copy_file` | Duplicate a file |
+| `drive_trash_file` | Move to Trash (reversible) |
+| `drive_delete_permanent` | **Irreversible** delete — prefer `drive_trash_file` |
+| `drive_share_file` | Add a permission (user/group/domain/anyone × reader/commenter/writer/…) |
+| `drive_list_permissions` | List sharing entries |
+| `drive_delete_permission` | Remove a sharing entry by ID |
+
 ## Caveats
 
-- **Unverified app cap.** Until your OAuth client is verified by Google, only **test users** (added in the GCP Console) can authorize, and the app is hard-capped at 100 users for its lifetime. `gmail.modify` is a **restricted scope** — verification requires a [CASA assessment](https://cloud.google.com/security/compliance/casa) (2–6 weeks, plus privacy policy URL, terms of service URL, demo video).
+- **Unverified app cap.** Until your OAuth client is verified by Google, only **test users** (added in the GCP Console) can authorize, and the app is hard-capped at 100 users for its lifetime. `gmail.modify`, `drive`, and `spreadsheets` are all **restricted/sensitive scopes** — verification for the full set requires a [CASA assessment](https://cloud.google.com/security/compliance/casa) (2–6 weeks, plus privacy policy URL, terms of service URL, demo video).
 - **One Google account per JWT (Phase 1).** To use a second Google account, complete the OAuth flow again. Per-tool `account` parameter for in-session switching is on the Phase 2 roadmap.
 - **No send-safety knob.** Tools execute `gmail_send` immediately. If you want a draft-only mode, do not expose `gmail_send` to the agent — point it at `gmail_create_draft` instead.
 - **ID token signature not verified in MVP.** The server trusts Google's ID token because the channel to Google's token endpoint is TLS. Hardening to verify against Google's JWKS is on the roadmap.
@@ -154,9 +196,9 @@ Claude Code will surface the OAuth flow in your terminal on first use.
 
 ## Roadmap
 
-- **Phase 2:** Google Sheets (CRUD on values, formatting, named ranges, batch updates) and Google Drive (list, get, download, upload, share, search).
-- **Phase 2.5:** Per-tool `account` parameter for multi-account workflows in a single MCP session.
-- **Phase 3:** Calendar, Docs, Forms, People — covering the rest of the Workspace surface.
+- **Per-tool `account` parameter** for multi-account workflows in a single MCP session.
+- **Calendar, Docs, Forms, People** — the rest of the Workspace surface.
+- **Resumable Drive uploads** for files larger than ~5 MB.
 - **Hardening:** ID token JWKS verification, refresh token rotation, structured per-account audit log.
 
 ## Contributing

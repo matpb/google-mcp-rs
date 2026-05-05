@@ -242,3 +242,287 @@ pub struct GmailTrashParams {
     pub target: LabelTarget,
     pub ids: Vec<String>,
 }
+
+// ===========================================================================
+// Sheets
+// ===========================================================================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetsCreateParams {
+    pub title: String,
+    /// Optional initial sheet titles (each becomes a tab).
+    #[serde(default)]
+    pub sheet_titles: Vec<String>,
+    /// Optional locale (e.g. `en_US`).
+    #[serde(default)]
+    pub locale: Option<String>,
+    /// Optional time zone (e.g. `America/Montreal`).
+    #[serde(default)]
+    pub time_zone: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetsGetParams {
+    pub spreadsheet_id: String,
+    /// Restrict to specific A1 ranges (otherwise the whole spreadsheet).
+    #[serde(default)]
+    pub ranges: Vec<String>,
+    /// Include the actual cell data (heavy). Default false.
+    #[serde(default)]
+    pub include_grid_data: bool,
+    /// Field mask (e.g. `properties.title,sheets.properties`). Default returns the full resource.
+    #[serde(default)]
+    pub fields: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetsGetValuesParams {
+    pub spreadsheet_id: String,
+    /// A1 range, e.g. `Sheet1!A1:C10` or `Sheet1` for a whole tab.
+    pub range: String,
+    /// `ROWS` (default) or `COLUMNS`.
+    #[serde(default)]
+    pub major_dimension: Option<String>,
+    /// `FORMATTED_VALUE` (default), `UNFORMATTED_VALUE`, or `FORMULA`.
+    #[serde(default)]
+    pub value_render_option: Option<String>,
+    /// `SERIAL_NUMBER` (default) or `FORMATTED_STRING`.
+    #[serde(default)]
+    pub date_time_render_option: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetsBatchGetValuesParams {
+    pub spreadsheet_id: String,
+    pub ranges: Vec<String>,
+    #[serde(default)]
+    pub major_dimension: Option<String>,
+    #[serde(default)]
+    pub value_render_option: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetsUpdateValuesParams {
+    pub spreadsheet_id: String,
+    pub range: String,
+    /// 2-D array, e.g. `[["A1","B1"],["A2","B2"]]`.
+    pub values: serde_json::Value,
+    /// `RAW` (default — values stored as-is) or `USER_ENTERED` (parses
+    /// formulas, dates, percentages like the UI does).
+    #[serde(default)]
+    pub value_input_option: Option<String>,
+    #[serde(default)]
+    pub major_dimension: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetsAppendValuesParams {
+    pub spreadsheet_id: String,
+    /// A1 range that defines the table to append to (e.g. `Sheet1!A:Z`).
+    pub range: String,
+    pub values: serde_json::Value,
+    /// `RAW` (default) or `USER_ENTERED`.
+    #[serde(default)]
+    pub value_input_option: Option<String>,
+    /// `OVERWRITE` (default — replace existing rows) or `INSERT_ROWS` (push them down).
+    #[serde(default)]
+    pub insert_data_option: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetsClearValuesParams {
+    pub spreadsheet_id: String,
+    pub range: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetsBatchUpdateValuesParams {
+    pub spreadsheet_id: String,
+    /// Body for the values:batchUpdate API. Pass the full body, e.g.
+    /// `{"valueInputOption":"USER_ENTERED","data":[{"range":"...","values":[[...]]}]}`.
+    pub body: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetsBatchUpdateParams {
+    pub spreadsheet_id: String,
+    /// Full body for spreadsheets:batchUpdate, e.g.
+    /// `{"requests":[{"addSheet":{"properties":{"title":"X"}}}],"includeSpreadsheetInResponse":true}`.
+    /// See https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/request
+    pub body: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetsAddSheetParams {
+    pub spreadsheet_id: String,
+    pub title: String,
+    /// Optional grid size; defaults to Google's defaults.
+    #[serde(default)]
+    pub row_count: Option<u32>,
+    #[serde(default)]
+    pub column_count: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetsDeleteSheetParams {
+    pub spreadsheet_id: String,
+    /// Numeric sheetId of the tab to delete (NOT its title).
+    pub sheet_id: i64,
+}
+
+// ===========================================================================
+// Drive
+// ===========================================================================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveListFilesParams {
+    /// Drive query (https://developers.google.com/drive/api/guides/search-files),
+    /// e.g. `name contains 'invoice' and mimeType = 'application/pdf'`.
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+    /// Field mask. Default returns id,name,mimeType,parents,modifiedTime,size,webViewLink.
+    #[serde(default)]
+    pub fields: Option<String>,
+    /// e.g. `modifiedTime desc`, `name`, `createdTime desc`.
+    #[serde(default)]
+    pub order_by: Option<String>,
+    /// `drive`, `appDataFolder`, or `photos`. Default `drive`.
+    #[serde(default)]
+    pub spaces: Option<String>,
+    /// Set true to include items from Shared Drives (and to send the
+    /// supportsAllDrives flag automatically).
+    #[serde(default)]
+    pub include_items_from_all_drives: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveGetFileParams {
+    pub file_id: String,
+    #[serde(default)]
+    pub fields: Option<String>,
+    #[serde(default)]
+    pub supports_all_drives: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveCreateFolderParams {
+    pub name: String,
+    /// Parent folder ID. Omit for root.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveCreateFileParams {
+    pub name: String,
+    /// MIME type for the upload (e.g. `text/plain`, `application/pdf`).
+    pub mime_type: String,
+    /// Base64-encoded file content.
+    pub data_base64: String,
+    /// Optional Drive folder to nest the file under.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveUpdateMetadataParams {
+    pub file_id: String,
+    /// Optional rename.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Comma-separated list of parent IDs to add (e.g. for moving into a folder).
+    #[serde(default)]
+    pub add_parents: Option<String>,
+    /// Comma-separated list of parent IDs to remove.
+    #[serde(default)]
+    pub remove_parents: Option<String>,
+    /// Star/unstar.
+    #[serde(default)]
+    pub starred: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveUpdateContentParams {
+    pub file_id: String,
+    pub mime_type: String,
+    pub data_base64: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveDownloadFileParams {
+    pub file_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveExportFileParams {
+    pub file_id: String,
+    /// Target MIME type, e.g. `application/pdf`,
+    /// `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`,
+    /// `text/csv`, `text/markdown`.
+    pub export_mime_type: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveCopyFileParams {
+    pub file_id: String,
+    /// Optional new name; defaults to `Copy of <original>`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Parent folder for the copy.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveTrashFileParams {
+    pub file_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveDeletePermanentParams {
+    pub file_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveSharePermissionParams {
+    pub file_id: String,
+    /// `reader`, `commenter`, `writer`, `fileOrganizer`, `organizer`, or `owner`.
+    pub role: String,
+    /// `user`, `group`, `domain`, or `anyone`.
+    pub r#type: String,
+    /// Required when `type=user` or `type=group`.
+    #[serde(default)]
+    pub email_address: Option<String>,
+    /// Required when `type=domain`.
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default = "default_send_notification")]
+    pub send_notification_email: bool,
+    #[serde(default)]
+    pub email_message: Option<String>,
+}
+
+fn default_send_notification() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveListPermissionsParams {
+    pub file_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveDeletePermissionParams {
+    pub file_id: String,
+    pub permission_id: String,
+}

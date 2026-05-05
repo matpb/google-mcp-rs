@@ -1,6 +1,6 @@
 [package]
 name = "google-mcp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 repository = "https://github.com/matpb/google-mcp-rs"
 readme = "README.md"
@@ -8,7 +8,7 @@ keywords = ["mcp", "gmail", "google", "workspace", "oauth"]
 categories = ["web-programming", "command-line-utilities"]
 license = "MIT"
 authors = ["Mathieu-Philippe Bourgeois <bourgeois.mat@gmail.com>"]
-description = "Multi-tenant Rust MCP server for Google Workspace (Gmail first; Sheets and Drive next) with full OAuth 2.0 over streamable HTTP"
+description = "Multi-tenant Rust MCP server for Google Workspace (Gmail + Sheets + Drive) with full OAuth 2.1 over streamable HTTP"
 
 [[bin]]
 name = "google-mcp"
