@@ -425,6 +425,7 @@ impl GmailClient {
         body: Option<&B>,
         query: &[(String, String)],
     ) -> Result<reqwest::Response, GmailError> {
+        let needs_zero_len = body.is_none() && method == Method::POST;
         let mut req = self
             .http
             .request(method, &url)
@@ -434,6 +435,11 @@ impl GmailClient {
         }
         if let Some(b) = body {
             req = req.json(b);
+        } else if needs_zero_len {
+            // Google's frontend rejects POST without Content-Length:0 with HTTP 411.
+            // Affects messages.trash, threads.trash, drafts.send (any POST that
+            // carries no body).
+            req = req.header(reqwest::header::CONTENT_LENGTH, "0");
         }
         Ok(req.send().await?)
     }

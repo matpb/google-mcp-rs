@@ -368,6 +368,7 @@ impl DriveClient {
         body: Option<&B>,
         query: &[(String, String)],
     ) -> Result<Value, DriveError> {
+        let needs_zero_len = body.is_none() && method == Method::POST;
         let mut req = self
             .http
             .request(method, &url)
@@ -377,6 +378,9 @@ impl DriveClient {
         }
         if let Some(b) = body {
             req = req.json(b);
+        } else if needs_zero_len {
+            // Google's frontend rejects body-less POSTs without Content-Length:0 (HTTP 411).
+            req = req.header(reqwest::header::CONTENT_LENGTH, "0");
         }
         let resp = req.send().await?;
         let status = resp.status();
