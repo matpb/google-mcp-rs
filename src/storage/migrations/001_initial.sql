@@ -15,10 +15,10 @@ CREATE INDEX idx_oauth_accounts_email ON oauth_accounts(email);
 
 -- MCP clients self-registered via RFC 7591 dynamic client registration.
 -- These are OUR clients, completely separate from Google's OAuth client.
+-- Secret is stored as an Argon2id PHC string (salt + params embedded).
 CREATE TABLE mcp_clients (
     client_id              TEXT PRIMARY KEY,
-    client_secret_hash     BLOB NOT NULL,        -- argon2id hash
-    client_secret_salt     BLOB NOT NULL,
+    client_secret_hash     TEXT NOT NULL,
     redirect_uris          TEXT NOT NULL,        -- JSON array
     client_name            TEXT,
     created_at             INTEGER NOT NULL
