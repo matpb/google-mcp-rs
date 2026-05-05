@@ -13,21 +13,22 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::{Json, Router, middleware, routing};
+use axum::{Router, middleware, routing};
 use http::HeaderName;
 use http::header::{AUTHORIZATION, CONTENT_TYPE};
+use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use config::ServerConfig;
-use credentials::{CredentialsError, resolve_google};
 use google::http as google_http;
 use google::session::SessionCache;
+use mcp::server::GoogleMcp;
 use oauth::google::{DEFAULT_SCOPES, GoogleOAuthClient};
 use oauth::proxy;
 use state::AppState;
@@ -108,10 +109,22 @@ async fn main() {
 fn build_router(state: AppState) -> Router {
     let cors = build_cors(&state.config);
 
-    // /mcp is auth-gated and currently returns a stub. Phase 3 replaces
-    // this with rmcp's StreamableHttpService once the tool surface lands.
+    // rmcp Streamable HTTP service. The factory closure is invoked once
+    // per session; we hand each one its own GoogleMcp pointing at the
+    // shared AppState. Stateless-mode (NeverSessionManager) keeps things
+    // simple: each request is independent.
+    let mcp_state = state.clone();
+    let mut mcp_config = StreamableHttpServerConfig::default();
+    mcp_config.stateful_mode = false;
+    mcp_config.json_response = true;
+    let mcp_service = StreamableHttpService::new(
+        move || Ok(GoogleMcp::new(mcp_state.clone())),
+        Arc::new(NeverSessionManager::default()),
+        mcp_config,
+    );
+
     let mcp_routes = Router::new()
-        .route("/mcp", routing::any(mcp_placeholder))
+        .route("/mcp", routing::any_service(mcp_service))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_gate::require_bearer,
@@ -168,37 +181,6 @@ fn build_cors(cfg: &ServerConfig) -> CorsLayer {
 
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
-}
-
-/// Placeholder until Phase 3 wires rmcp's `StreamableHttpService`.
-async fn mcp_placeholder(
-    State(state): State<AppState>,
-    parts: http::request::Parts,
-) -> impl IntoResponse {
-    match resolve_google(
-        &parts,
-        &state.config.jwt_secret,
-        &state.config.base_url,
-        &state.session_cache,
-    )
-    .await
-    {
-        Ok(session) => Json(serde_json::json!({
-            "status": "authenticated",
-            "google_sub": session.google_sub,
-            "email": session.email,
-            "scopes": session.scopes,
-            "note": "MCP tool surface lands in Phase 3 — this stub confirms auth works",
-        }))
-        .into_response(),
-        Err(CredentialsError::Missing) | Err(CredentialsError::Malformed) => {
-            (StatusCode::UNAUTHORIZED, "authorization required").into_response()
-        }
-        Err(e) => {
-            tracing::warn!(err = %e, "credentials resolve failed");
-            (StatusCode::UNAUTHORIZED, format!("auth failed: {e}")).into_response()
-        }
-    }
 }
 
 fn spawn_oauth_state_sweeper(db: Db) {
