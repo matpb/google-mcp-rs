@@ -24,6 +24,7 @@ use rmcp::model::ErrorCode;
 use serde_json::{Value, json};
 
 use crate::credentials::CredentialsError;
+use crate::google::docs::DocsError;
 use crate::google::drive::DriveError;
 use crate::google::gmail::GmailError;
 use crate::google::session::SessionError;
@@ -212,6 +213,7 @@ fn default_not_found_hint(kind: &str) -> String {
         "attachment" => "Use gmail_list_attachments to discover valid attachment IDs for a message.".into(),
         "file" => "Use drive_list_files to discover valid file IDs.".into(),
         "spreadsheet" => "Use drive_list_files with `mimeType = 'application/vnd.google-apps.spreadsheet'` to find spreadsheets.".into(),
+        "document" => "Use drive_list_files with `mimeType = 'application/vnd.google-apps.document'` to find Google Docs.".into(),
         "permission" => "Use drive_list_permissions to discover valid permission IDs for a file.".into(),
         _ => format!("Verify the {kind} ID exists."),
     }
@@ -254,6 +256,21 @@ impl From<SheetsError> for McpError {
             SheetsError::Parse(err) => {
                 McpError::internal(format!("could not parse Sheets response: {err}"))
                     .with_service("sheets")
+            }
+        }
+    }
+}
+
+impl From<DocsError> for McpError {
+    fn from(e: DocsError) -> Self {
+        match e {
+            DocsError::Http(err) => transient_from_reqwest("docs", err),
+            DocsError::Api { status, message } => {
+                google_api_error("docs", status.as_u16(), message, None)
+            }
+            DocsError::Parse(err) => {
+                McpError::internal(format!("could not parse Docs response: {err}"))
+                    .with_service("docs")
             }
         }
     }

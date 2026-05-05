@@ -526,3 +526,61 @@ pub struct DriveDeletePermissionParams {
     pub file_id: String,
     pub permission_id: String,
 }
+
+// ===========================================================================
+// Docs
+// ===========================================================================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsCreateParams {
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsGetParams {
+    pub document_id: String,
+    /// `DEFAULT_FOR_CURRENT_ACCESS` (default), `SUGGESTIONS_INLINE`,
+    /// `PREVIEW_SUGGESTIONS_ACCEPTED`, `PREVIEW_WITHOUT_SUGGESTIONS`.
+    #[serde(default)]
+    pub suggestions_view_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsGetTextParams {
+    pub document_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsAppendTextParams {
+    pub document_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsInsertTextParams {
+    pub document_id: String,
+    pub text: String,
+    /// Character index where to insert (0 = before everything; 1 = after
+    /// the document's leading section break which is the typical
+    /// "start of body" position).
+    pub index: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsReplaceTextParams {
+    pub document_id: String,
+    pub find: String,
+    pub replace: String,
+    /// Default false — case-insensitive search.
+    #[serde(default)]
+    pub match_case: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocsBatchUpdateParams {
+    pub document_id: String,
+    /// Full body for documents:batchUpdate, e.g.
+    /// `{"requests":[{"insertText":{"location":{"index":1},"text":"..."}}]}`.
+    /// See https://developers.google.com/docs/api/reference/rest/v1/documents/request
+    pub body: serde_json::Value,
+}

@@ -23,7 +23,10 @@ impl GoogleMcp {
     pub fn new(state: AppState) -> Self {
         // Compose the per-domain routers via `ToolRouter::Add`. Each domain
         // owns its own `#[tool_router(router = ...)]` impl block.
-        let tool_router = Self::gmail_router() + Self::sheets_router() + Self::drive_router();
+        let tool_router = Self::gmail_router()
+            + Self::sheets_router()
+            + Self::drive_router()
+            + Self::docs_router();
         Self { state, tool_router }
     }
 

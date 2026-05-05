@@ -2,13 +2,13 @@
 
 A multi-tenant **Model Context Protocol** server for **Google Workspace**, written in Rust. Built around streamable HTTP transport with full **OAuth 2.1** so it plugs straight into Claude.ai, Claude Code, ChatGPT custom connectors, Cursor, or any MCP client that speaks the 2025-11-25 authorization spec.
 
-> **Status:** v0.2.0 — Gmail (25 tools) + Sheets (11) + Drive (14) live. **50 tools** total.
+> **Status:** v0.3.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (7) live. **57 tools** total.
 
 ## Why
 
 The first-party Google Workspace MCP server is missing fundamentals (you cannot send an email from it). Existing community servers are Python or single-tenant. `google-mcp-rs` aims to be the Rust server you actually want to deploy:
 
-- **Full Gmail / Sheets / Drive surface** — 50 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), and Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash).
+- **Full Gmail / Sheets / Drive / Docs surface** — 57 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), and Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure).
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256.
 - **Streamable HTTP only** — no stdio. Designed to live behind a tunnel, talk to remote MCP clients.
@@ -52,7 +52,7 @@ State is threaded MCP-client → Google → callback via single-use opaque token
 In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
 
 1. Pick or create a GCP project.
-2. Enable the **Gmail API**, **Sheets API**, and **Drive API**.
+2. Enable the **Gmail API**, **Sheets API**, **Drive API**, and **Docs API**.
 3. **OAuth consent screen** → External, app name `google-mcp` (or whatever you want users to see), user support email, developer email.
 4. Add scopes:
    - `openid`
@@ -60,6 +60,7 @@ In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
    - `https://www.googleapis.com/auth/gmail.modify`
    - `https://www.googleapis.com/auth/spreadsheets`
    - `https://www.googleapis.com/auth/drive`
+   - `https://www.googleapis.com/auth/documents`
 5. Add yourself + any beta users to the **Test users** list (until the app is verified, only test users can authorize — see [Caveats](#caveats)).
 6. **Credentials** → **Create credentials** → **OAuth 2.0 Client ID** → **Web application**.
 7. Authorized redirect URI: `${BASE_URL}/oauth/google/callback` (e.g. `http://localhost:8433/oauth/google/callback` for dev).
@@ -165,6 +166,18 @@ Claude Code will surface the OAuth flow in your terminal on first use.
 | `sheets_batch_update` | Schema-level batch update — add/delete sheets, formatting, conditional formatting, charts, banding (raw `requests[]` passthrough) |
 | `sheets_add_sheet` | Convenience: add a new tab |
 | `sheets_delete_sheet` | Convenience: remove a tab by `sheetId` |
+
+### Docs (7)
+
+| Tool | Purpose |
+|---|---|
+| `docs_create` | Create an empty Google Doc with a title |
+| `docs_get` | Get a document's full structured payload (paragraphs, runs, tables, lists, headers, footers, styles) |
+| `docs_get_text` | Fetch the doc and return its body as **flattened plain text** — the high-value tool for agents reading content |
+| `docs_append_text` | Append plain text to the end of the document |
+| `docs_insert_text` | Insert plain text at a specific character index |
+| `docs_replace_text` | Find every occurrence of a string and replace it (case-sensitive optional) |
+| `docs_batch_update` | Power-user: raw `requests[]` passthrough for formatting, headings, tables, named ranges, sections, etc. |
 
 ### Drive (14)
 
