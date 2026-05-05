@@ -7,7 +7,7 @@ services:
     container_name: google-mcp
     restart: unless-stopped
     ports:
-      - "${MCP_PORT:-8433}:8433"
+      - "127.0.0.1:${MCP_PORT:-8433}:8433"
     environment:
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8433"
