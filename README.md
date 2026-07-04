@@ -2,7 +2,7 @@
 
 A multi-tenant **Model Context Protocol** server for **Google Workspace**, written in Rust. Built around streamable HTTP transport with full **OAuth 2.1** so it plugs straight into Claude.ai, Claude Code, ChatGPT custom connectors, Cursor, or any MCP client that speaks the 2025-11-25 authorization spec.
 
-> **Status:** v0.6.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) live. **76 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 optional maintenance tools when `FILE_ROOT` is enabled.
+> **Status:** v0.7.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) live. **76 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`.
 
 ## Why
 
@@ -126,7 +126,8 @@ For **Claude.ai / ChatGPT custom connectors / Cursor**, add a custom connector p
 | `MCP_PORT` | no | `8433` | Listen port |
 | `CORS_ALLOW_LOCALHOST` | no | `false` | Allow `http://localhost:*` in CORS (dev only) |
 | `ENABLED_DOMAINS` | no | all five | Comma-separated subset of `gmail,sheets,drive,docs,calendar`. Filters both the MCP tool surface and the OAuth scopes requested from Google. Unset = all five. See [Scoping the surface](#scoping-the-surface) below. |
-| `FILE_ROOT` | no | — (disabled) | Absolute path to the file-exchange directory, bind-mounted into the container at the same path. Enables attaching/uploading by `path` and saving downloads by `dest_path` instead of base64, plus the `files_info` / `files_cleanup` tools. Unset = base64-only. See [File handling](#file-handling-attachments-uploads-downloads) below. |
+| `FILE_ROOT` | no | — (disabled) | Absolute path to the file-exchange directory, bind-mounted into the container at the same path. Enables attaching/uploading by `path` and saving downloads by `dest_path` instead of base64. Unset = base64-only. See [File handling](#file-handling-attachments-uploads-downloads) below. |
+| `FILE_MAINTENANCE_TOOLS` | no | `off` | Whether the directory-maintenance tools are exposed: `off` (neither), `info` (read-only `files_info`), or `full` (`files_info` + the deleting `files_cleanup`). Off by default, so no deletion/listing tool exists unless you opt in. Only meaningful when `FILE_ROOT` is set. |
 | `RUST_LOG` | no | `google_mcp=info,rmcp=warn,reqwest=warn` | Tracing filter — keep `reqwest` ≤ `warn` to avoid logging URLs with PII |
 
 ## Scoping the surface
@@ -173,14 +174,14 @@ It also does **server-side transfers** so bytes move Google↔Google without a r
 
 **Discoverability.** When `FILE_ROOT` is set, the MCP server's `instructions` (returned on connect) include a FILE HANDLING section that states the live exchange path and these rules, so any calling agent learns the protocol without being told.
 
-**Keeping it tidy.** The exchange directory is scratch space and accumulates over time. Two tools (present only when `FILE_ROOT` is set) let an agent or you manage it — nothing is ever deleted automatically:
+**Keeping it tidy.** The exchange directory accumulates over time. Two optional tools can manage it — **off by default** and gated by `FILE_MAINTENANCE_TOOLS` (`off` / `info` / `full`), so a deletion tool never exists unless you opt in. Nothing is ever deleted automatically.
 
-| Tool | Purpose |
-| --- | --- |
-| `files_info` | Report the exchange path, file count, total bytes, and a listing (oldest first). |
-| `files_cleanup` | Delete files by age (`older_than_hours`) and/or name (`name_contains`). **Defaults to `dry_run: true`** — reports what would go and removes nothing until you pass `dry_run: false`. |
+| Tool | Requires | Purpose |
+| --- | --- | --- |
+| `files_info` | `FILE_MAINTENANCE_TOOLS=info` or `full` | Report the exchange path, file count, total bytes, and a listing (oldest first). Read-only. |
+| `files_cleanup` | `FILE_MAINTENANCE_TOOLS=full` | Delete files by age (`older_than_hours`) and/or name (`name_contains`). **Defaults to `dry_run: true`** — reports what would go and removes nothing until you pass `dry_run: false`. |
 
-Anything under a `keep/` subdirectory of `FILE_ROOT` is invisible to `files_cleanup` and never deleted — put files there that you want to survive a sweep.
+Anything under a `keep/` subdirectory of `FILE_ROOT` is invisible to `files_cleanup` and never deleted. If you point `FILE_ROOT` at a directory you manage yourself (e.g. your Downloads folder), leave `FILE_MAINTENANCE_TOOLS=off` (the default) so the server can never delete anything there.
 
 ## Tools
 

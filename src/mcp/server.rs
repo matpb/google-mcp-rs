@@ -34,11 +34,19 @@ impl GoogleMcp {
         for d in iter {
             tool_router += Self::router_for(d);
         }
-        // File-exchange maintenance tools exist only when FILE_ROOT is set —
-        // they're meaningless without an exchange directory, and this keeps
-        // them out of the surface (and the schema) for base64-only deployments.
+        // File-maintenance tools exist only when FILE_ROOT is set (they're
+        // meaningless without an exchange directory) AND the operator opted in
+        // via FILE_MAINTENANCE_TOOLS. Default is Off, so no listing/deletion
+        // tool appears unless explicitly enabled. `files_info` is read-only
+        // (Info or Full); `files_cleanup` deletes (Full only).
         if state.config.file_jail.is_some() {
-            tool_router += Self::files_router();
+            let m = state.config.file_maintenance;
+            if m.info_enabled() {
+                tool_router += Self::files_info_router();
+            }
+            if m.cleanup_enabled() {
+                tool_router += Self::files_cleanup_router();
+            }
         }
         Self { state, tool_router }
     }
@@ -115,6 +123,7 @@ mod harness {
             cors_allow_localhost: false,
             enabled_domains,
             file_jail: None,
+            file_maintenance: crate::files::FileMaintenance::Off,
         });
         let state = AppState {
             config,
@@ -126,13 +135,16 @@ mod harness {
         GoogleMcp::new(state)
     }
 
-    pub(crate) async fn make_mcp_with_jail(enabled_domains: Vec<Domain>) -> GoogleMcp {
+    pub(crate) async fn make_mcp_with_jail(
+        enabled_domains: Vec<Domain>,
+        maintenance: crate::files::FileMaintenance,
+    ) -> GoogleMcp {
         let dir = std::env::temp_dir().join(format!("gmcp-router-jail-{}", std::process::id()));
         let jail = crate::files::FileJail::from_env(Some(dir.to_str().unwrap()))
             .unwrap()
             .unwrap();
-        let mut mcp = make_mcp(enabled_domains.clone()).await;
-        // Rebuild with a config that has the jail set.
+        let mcp = make_mcp(enabled_domains.clone()).await;
+        // Rebuild with a config that has the jail + maintenance level set.
         let cfg = crate::config::ServerConfig {
             host: "127.0.0.1".parse().unwrap(),
             port: 8433,
@@ -145,11 +157,11 @@ mod harness {
             cors_allow_localhost: false,
             enabled_domains,
             file_jail: Some(jail),
+            file_maintenance: maintenance,
         };
         let mut state = mcp.state.clone();
         state.config = std::sync::Arc::new(cfg);
-        mcp = GoogleMcp::new(state);
-        mcp
+        GoogleMcp::new(state)
     }
 
     pub(crate) fn tool_names(mcp: &GoogleMcp) -> Vec<String> {
@@ -181,28 +193,46 @@ mod tests {
     use crate::domain::Domain;
 
     #[tokio::test]
-    async fn files_tools_present_only_when_file_root_enabled() {
-        // No jail (the default harness) => no files_* tools.
+    async fn files_tools_gated_by_file_root_and_maintenance_level() {
+        use super::GoogleMcp;
+        use crate::files::FileMaintenance;
+        let files_of = |m: &GoogleMcp| -> Vec<String> {
+            let mut v: Vec<String> = tool_names(m)
+                .into_iter()
+                .filter(|n| n.starts_with("files_"))
+                .collect();
+            v.sort();
+            v
+        };
+
+        // No FILE_ROOT => never any files_* tools.
         let without = make_mcp(vec![Domain::Gmail]).await;
+        assert!(files_of(&without).is_empty());
+
+        // FILE_ROOT set but maintenance Off (the default) => still none.
+        let off = make_mcp_with_jail(vec![Domain::Gmail], FileMaintenance::Off).await;
         assert!(
-            !tool_names(&without).iter().any(|n| n.starts_with("files_")),
-            "files_* tools must not load without FILE_ROOT"
+            files_of(&off).is_empty(),
+            "Off must expose no maintenance tools even with FILE_ROOT set"
         );
-        // Jail set => exactly files_info + files_cleanup appear, on top of
-        // the domain's own tools.
-        let with = make_mcp_with_jail(vec![Domain::Gmail]).await;
-        let names = tool_names(&with);
-        let files: Vec<_> = names.iter().filter(|n| n.starts_with("files_")).collect();
+
+        // Info => files_info only (read-only), no deletion tool.
+        let info = make_mcp_with_jail(vec![Domain::Gmail], FileMaintenance::Info).await;
+        assert_eq!(files_of(&info), vec!["files_info".to_string()]);
+
+        // Full => files_info + files_cleanup.
+        let full = make_mcp_with_jail(vec![Domain::Gmail], FileMaintenance::Full).await;
         assert_eq!(
-            files.len(),
-            2,
-            "expected files_info + files_cleanup, got {files:?}"
+            files_of(&full),
+            vec!["files_cleanup".to_string(), "files_info".to_string()]
         );
-        assert!(names.iter().any(|n| n == "files_info"));
-        assert!(names.iter().any(|n| n == "files_cleanup"));
-        // Domain tools still present.
+
+        // Domain tools unaffected.
         assert_eq!(
-            names.iter().filter(|n| n.starts_with("gmail_")).count(),
+            tool_names(&full)
+                .iter()
+                .filter(|n| n.starts_with("gmail_"))
+                .count(),
             expected_count(Domain::Gmail)
         );
     }

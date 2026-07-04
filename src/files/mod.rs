@@ -45,6 +45,50 @@ pub enum FileError {
     },
 }
 
+/// Which file-maintenance tools (`files_info`, `files_cleanup`) are exposed
+/// on the MCP surface. Independent of whether file *exchange* (attach/upload/
+/// download by path) works — that's governed by `FILE_ROOT` alone. Defaults
+/// to `Off` so a deployment never exposes a deletion tool (or even a
+/// directory-listing tool) unless the operator explicitly opts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FileMaintenance {
+    /// Neither tool is registered (default).
+    #[default]
+    Off,
+    /// Read-only `files_info` only — inspect the directory, never delete.
+    Info,
+    /// `files_info` + `files_cleanup` — full maintenance, including deletion.
+    Full,
+}
+
+impl FileMaintenance {
+    /// Parse the `FILE_MAINTENANCE_TOOLS` env value. Case-insensitive.
+    /// Unset/empty/`off`/`none`/`false`/`0` → Off; `info`/`readonly` → Info;
+    /// `full`/`cleanup`/`all`/`true` → Full.
+    pub fn parse(s: Option<&str>) -> Result<Self, String> {
+        match s.map(|x| x.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("off") | Some("none") | Some("false") | Some("0") => {
+                Ok(Self::Off)
+            }
+            Some("info") | Some("readonly") | Some("read-only") => Ok(Self::Info),
+            Some("full") | Some("cleanup") | Some("all") | Some("true") => Ok(Self::Full),
+            Some(other) => Err(format!(
+                "invalid value `{other}` (expected one of: off, info, full)"
+            )),
+        }
+    }
+
+    /// Whether the read-only `files_info` tool should be registered.
+    pub fn info_enabled(self) -> bool {
+        matches!(self, Self::Info | Self::Full)
+    }
+
+    /// Whether the deleting `files_cleanup` tool should be registered.
+    pub fn cleanup_enabled(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 /// A canonicalized directory that scopes every filesystem read/write the
 /// file tools are allowed to perform. Cheap to clone.
 #[derive(Clone, Debug)]
@@ -558,6 +602,25 @@ mod tests {
         std::fs::write(&normal, b"yy").unwrap();
         assert_eq!(jail.remove_file(&normal).unwrap(), 2);
         assert!(!normal.exists());
+    }
+
+    #[test]
+    fn file_maintenance_parse() {
+        use FileMaintenance::*;
+        assert_eq!(FileMaintenance::parse(None).unwrap(), Off);
+        assert_eq!(FileMaintenance::parse(Some("")).unwrap(), Off);
+        assert_eq!(FileMaintenance::parse(Some("off")).unwrap(), Off);
+        assert_eq!(FileMaintenance::parse(Some("OFF")).unwrap(), Off);
+        assert_eq!(FileMaintenance::parse(Some("none")).unwrap(), Off);
+        assert_eq!(FileMaintenance::parse(Some(" info ")).unwrap(), Info);
+        assert_eq!(FileMaintenance::parse(Some("readonly")).unwrap(), Info);
+        assert_eq!(FileMaintenance::parse(Some("full")).unwrap(), Full);
+        assert_eq!(FileMaintenance::parse(Some("cleanup")).unwrap(), Full);
+        assert!(FileMaintenance::parse(Some("bogus")).is_err());
+        // Capability helpers.
+        assert!(!Off.info_enabled() && !Off.cleanup_enabled());
+        assert!(Info.info_enabled() && !Info.cleanup_enabled());
+        assert!(Full.info_enabled() && Full.cleanup_enabled());
     }
 
     #[test]

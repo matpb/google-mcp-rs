@@ -15,7 +15,7 @@ use crate::files::{FileJail, plan_delete};
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
 
-#[tool_router(router = files_router, vis = "pub(crate)")]
+#[tool_router(router = files_info_router, vis = "pub(crate)")]
 impl GoogleMcp {
     #[tool(
         name = "files_info",
@@ -59,7 +59,10 @@ impl GoogleMcp {
         })
         .to_string())
     }
+}
 
+#[tool_router(router = files_cleanup_router, vis = "pub(crate)")]
+impl GoogleMcp {
     #[tool(
         name = "files_cleanup",
         description = "Tidy the file-exchange directory (FILE_ROOT). SAFE BY DEFAULT: dry_run is true unless you set it false, so by default this only REPORTS what would be deleted. Narrow the selection with `older_than_hours` and/or `name_contains`; with neither, it selects every file. Only regular files inside FILE_ROOT are eligible; the reserved `keep/` subdirectory is never touched. Set `dry_run=false` to actually delete."

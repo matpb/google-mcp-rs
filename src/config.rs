@@ -2,7 +2,7 @@ use std::fmt;
 use std::net::IpAddr;
 
 use crate::domain::{self, Domain};
-use crate::files::FileJail;
+use crate::files::{FileJail, FileMaintenance};
 
 /// Operator-supplied configuration loaded from the environment at startup.
 ///
@@ -24,6 +24,9 @@ pub struct ServerConfig {
     /// `FILE_ROOT` is set (and bind-mounted into the container); `None`
     /// disables path-based reads/writes so tools fall back to base64.
     pub file_jail: Option<FileJail>,
+    /// Which file-maintenance tools (`files_info`/`files_cleanup`) to expose.
+    /// Off by default so no deletion/listing tool appears unless opted in.
+    pub file_maintenance: FileMaintenance,
 }
 
 impl ServerConfig {
@@ -75,6 +78,10 @@ impl ServerConfig {
         let file_jail = FileJail::from_env(optional_env("FILE_ROOT").as_deref())
             .map_err(|e| ConfigError::InvalidFileRoot(e.to_string()))?;
 
+        let file_maintenance =
+            FileMaintenance::parse(optional_env("FILE_MAINTENANCE_TOOLS").as_deref())
+                .map_err(ConfigError::InvalidFileMaintenance)?;
+
         Ok(Self {
             host,
             port,
@@ -87,6 +94,7 @@ impl ServerConfig {
             cors_allow_localhost,
             enabled_domains,
             file_jail,
+            file_maintenance,
         })
     }
 
@@ -132,6 +140,8 @@ pub enum ConfigError {
     InvalidDomain(String),
     #[error("invalid env var FILE_ROOT: {0}")]
     InvalidFileRoot(String),
+    #[error("invalid env var FILE_MAINTENANCE_TOOLS: {0}")]
+    InvalidFileMaintenance(String),
 }
 
 impl fmt::Debug for ServerConfig {
@@ -148,6 +158,7 @@ impl fmt::Debug for ServerConfig {
             .field("cors_allow_localhost", &self.cors_allow_localhost)
             .field("enabled_domains", &self.enabled_domains)
             .field("file_jail", &self.file_jail)
+            .field("file_maintenance", &self.file_maintenance)
             .finish()
     }
 }
