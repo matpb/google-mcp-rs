@@ -9,8 +9,8 @@ use rmcp::{ErrorData, ServerHandler, tool_handler};
 
 use crate::credentials::resolve_google;
 use crate::domain::Domain;
-use crate::files::FileJail;
 use crate::errors::to_mcp;
+use crate::files::FileJail;
 use crate::google::gmail::GmailClient;
 use crate::google::session::GoogleAccountSession;
 use crate::state::AppState;
@@ -193,7 +193,11 @@ mod tests {
         let with = make_mcp_with_jail(vec![Domain::Gmail]).await;
         let names = tool_names(&with);
         let files: Vec<_> = names.iter().filter(|n| n.starts_with("files_")).collect();
-        assert_eq!(files.len(), 2, "expected files_info + files_cleanup, got {files:?}");
+        assert_eq!(
+            files.len(),
+            2,
+            "expected files_info + files_cleanup, got {files:?}"
+        );
         assert!(names.iter().any(|n| n == "files_info"));
         assert!(names.iter().any(|n| n == "files_cleanup"));
         // Domain tools still present.

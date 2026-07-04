@@ -565,7 +565,12 @@ mod tests {
     #[test]
     fn deliver_writes_to_dest_path() {
         let jail = temp_jail();
-        let out = deliver_bytes(Some(&jail), Some("out.bin"), "application/octet-stream", b"data");
+        let out = deliver_bytes(
+            Some(&jail),
+            Some("out.bin"),
+            "application/octet-stream",
+            b"data",
+        );
         let v = parse(&out.unwrap());
         assert_eq!(v["sizeBytes"], 4);
         let path = v["path"].as_str().unwrap();

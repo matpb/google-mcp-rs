@@ -123,10 +123,8 @@ impl GoogleMcp {
     /// belt-and-suspenders.)
     fn file_jail(&self) -> Result<&FileJail, ErrorData> {
         self.state.config.file_jail.as_ref().ok_or_else(|| {
-            McpError::invalid_input(
-                "file-exchange is disabled on this server (FILE_ROOT unset)",
-            )
-            .into()
+            McpError::invalid_input("file-exchange is disabled on this server (FILE_ROOT unset)")
+                .into()
         })
     }
 }

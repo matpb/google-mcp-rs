@@ -880,20 +880,20 @@ async fn resolve_attachment(
             // provide one, then pull the bytes.
             let mut filename = att.filename.clone();
             let mut mime_type = att.mime_type.clone();
-            if filename.is_none() || mime_type.is_none() {
-                if let Ok(meta) = drive.get_file(file_id, Some("name,mimeType"), true).await {
-                    if filename.is_none() {
-                        filename = meta
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                    }
-                    if mime_type.is_none() {
-                        mime_type = meta
-                            .get("mimeType")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                    }
+            if (filename.is_none() || mime_type.is_none())
+                && let Ok(meta) = drive.get_file(file_id, Some("name,mimeType"), true).await
+            {
+                if filename.is_none() {
+                    filename = meta
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                }
+                if mime_type.is_none() {
+                    mime_type = meta
+                        .get("mimeType")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
                 }
             }
             let (ct, bytes) = drive

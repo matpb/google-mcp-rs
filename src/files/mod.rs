@@ -186,9 +186,19 @@ impl FileJail {
     /// List every regular file under the root (recursively), skipping the
     /// reserved `keep/` subtree and any symlinks. Used by the `files_info` /
     /// `files_cleanup` tools.
+    ///
+    /// Tolerant by design: individual files or subdirectories the process
+    /// can't stat/enter (common when the root is a broad directory like the
+    /// user's Downloads, which may hold app-private subdirs) are silently
+    /// skipped rather than failing the whole scan. Only an unreadable *root*
+    /// is a hard error.
     pub fn scan(&self) -> Result<Vec<DirEntryInfo>, FileError> {
+        let rd = std::fs::read_dir(&self.root).map_err(|e| FileError::Io {
+            path: self.root.display().to_string(),
+            source: e,
+        })?;
         let mut out = Vec::new();
-        scan_dir(&self.root, &self.root, &mut out)?;
+        scan_entries(&self.root, rd, &mut out);
         Ok(out)
     }
 
@@ -240,15 +250,11 @@ fn is_in_keep(root: &Path, path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn scan_dir(root: &Path, dir: &Path, out: &mut Vec<DirEntryInfo>) -> Result<(), FileError> {
-    let rd = std::fs::read_dir(dir).map_err(|e| FileError::Io {
-        path: dir.display().to_string(),
-        source: e,
-    })?;
+fn scan_entries(root: &Path, rd: std::fs::ReadDir, out: &mut Vec<DirEntryInfo>) {
     for entry in rd.flatten() {
         let path = entry.path();
         // Never follow symlinks (defends against escapes) and skip the
-        // reserved keep/ subtree entirely.
+        // reserved keep/ subtree entirely. Any entry we can't stat is skipped.
         let Ok(meta) = entry.metadata() else { continue };
         if meta.file_type().is_symlink() {
             continue;
@@ -257,7 +263,10 @@ fn scan_dir(root: &Path, dir: &Path, out: &mut Vec<DirEntryInfo>) -> Result<(), 
             continue;
         }
         if meta.is_dir() {
-            scan_dir(root, &path, out)?;
+            // Skip (don't abort) subdirectories we can't enter.
+            if let Ok(sub) = std::fs::read_dir(&path) {
+                scan_entries(root, sub, out);
+            }
         } else if meta.is_file() {
             out.push(DirEntryInfo {
                 path,
@@ -266,7 +275,6 @@ fn scan_dir(root: &Path, dir: &Path, out: &mut Vec<DirEntryInfo>) -> Result<(), 
             });
         }
     }
-    Ok(())
 }
 
 /// Select which scanned entries a cleanup would remove. Pure (takes `now`
