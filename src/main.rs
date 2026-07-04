@@ -3,6 +3,7 @@ mod config;
 mod credentials;
 mod domain;
 mod errors;
+mod files;
 mod google;
 mod mcp;
 mod mime;

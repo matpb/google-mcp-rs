@@ -9,12 +9,14 @@ use rmcp::{ErrorData, tool, tool_router};
 use serde_json::{Value, json};
 
 use crate::errors::{McpError, to_mcp};
+use crate::files::FileJail;
+use crate::google::drive::DriveClient;
 use crate::google::gmail::{
     CreateLabel, GmailClient, GmailError, LabelColor, ModifyLabels, UpdateLabel,
 };
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
-use crate::mime::{Compose, ReplyContext, ResolvedAttachment};
+use crate::mime::{AttachmentInput, AttachmentSource, Compose, ReplyContext, ResolvedAttachment};
 
 #[tool_router(router = gmail_router, vis = "pub(crate)")]
 impl GoogleMcp {
@@ -177,19 +179,96 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_download_attachment",
-        description = "Download an attachment by message + attachment ID. Returns `{ size, data }` where `data` is base64url-encoded (Gmail's native format). Decode client-side."
+        description = "Download an attachment by message + attachment ID. Preferred: set `dest_path` (inside FILE_ROOT) to write bytes to disk, or `to_drive_folder_id` to push straight into Drive — neither routes bytes through the model's context. Without either, returns `{ size, data }` where `data` is base64url (capped when a file-exchange dir is available)."
     )]
     async fn gmail_download_attachment(
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<GmailDownloadAttachmentParams>,
     ) -> Result<String, ErrorData> {
-        let client = self.gmail_for(&parts).await?;
-        let v = client
+        let session = self.resolve_session(&parts).await?;
+        let client = GmailClient::new((*self.state.http).clone(), &session.access_token);
+        let jail = self.state.config.file_jail.as_ref();
+
+        // Fast path: no disk/Drive destination and no size concern — return
+        // Gmail's native payload untouched (backwards compatible).
+        let raw = client
             .get_attachment(&p.message_id, &p.attachment_id)
             .await
+            .map_err(|e| reclassify_not_found(e, "attachment", &p.attachment_id))?;
+
+        if p.dest_path.is_none() && p.to_drive_folder_id.is_none() {
+            let size = raw.get("size").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            if jail.is_some() && size > crate::files::INLINE_MAX_BYTES {
+                return Err(McpError::invalid_input(format!(
+                    "attachment is {size} bytes — too large to return inline as base64"
+                ))
+                .with_hint(
+                    "Pass `dest_path` (inside FILE_ROOT) or `to_drive_folder_id` to move it without base64.",
+                )
+                .into());
+            }
+            return Ok(raw.to_string());
+        }
+
+        // Decode the bytes for a disk/Drive destination.
+        let data_b64 = raw.get("data").and_then(|v| v.as_str()).ok_or_else(|| {
+            ErrorData::from(McpError::internal(
+                "Gmail attachment response had no `data` field",
+            ))
+        })?;
+        let bytes = crate::mime::decode_base64(data_b64).map_err(to_mcp)?;
+
+        // Resolve a sensible filename/mime from the message's MIME tree when
+        // the caller didn't supply one.
+        let (meta_name, meta_mime) =
+            find_attachment_meta(&client, &p.message_id, &p.attachment_id).await;
+
+        if let Some(dest) = &p.dest_path {
+            let jail = jail.ok_or_else(file_exchange_disabled)?;
+            let written = jail.write(dest, &bytes).map_err(to_mcp)?;
+            // Fall back to the destination's basename for the reported name,
+            // and infer the MIME from it when the message lookup came up empty.
+            let filename = p.filename.clone().or(meta_name).or_else(|| {
+                written
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            });
+            let mime_type = meta_mime.or_else(|| {
+                filename
+                    .as_deref()
+                    .map(|f| crate::files::guess_mime(f).to_string())
+            });
+            return Ok(json!({
+                "path": written.display().to_string(),
+                "sizeBytes": bytes.len(),
+                "filename": filename,
+                "mimeType": mime_type,
+            })
+            .to_string());
+        }
+
+        // to_drive_folder_id path.
+        let folder = p.to_drive_folder_id.as_deref().unwrap_or("root");
+        let name = p
+            .filename
+            .clone()
+            .or(meta_name)
+            .unwrap_or_else(|| format!("attachment-{}", p.attachment_id));
+        let mime = meta_mime.unwrap_or_else(|| crate::files::guess_mime(&name).to_string());
+        let drive = DriveClient::new((*self.state.http).clone(), session.access_token.clone());
+        let mut metadata = json!({ "name": name, "mimeType": mime });
+        if folder != "root" {
+            metadata["parents"] = json!([folder]);
+        } else {
+            metadata["parents"] = json!(["root"]);
+        }
+        let created = drive
+            .create_with_content(&metadata, &bytes, &mime)
+            .await
             .map_err(to_mcp)?;
-        Ok(v.to_string())
+        Ok(created.to_string())
     }
 
     // -----------------------------------------------------------------
@@ -241,7 +320,15 @@ impl GoogleMcp {
     ) -> Result<String, ErrorData> {
         let session = self.resolve_session(&parts).await?;
         let client = GmailClient::new((*self.state.http).clone(), &session.access_token);
-        let (raw, thread_id) = build_outgoing_message(&client, &session.email, p.compose).await?;
+        let (raw, thread_id) = build_outgoing_message(
+            &client,
+            (*self.state.http).clone(),
+            &session.access_token,
+            self.state.config.file_jail.as_ref(),
+            &session.email,
+            p.compose,
+        )
+        .await?;
         let v = client
             .create_draft(&raw, thread_id.as_deref())
             .await
@@ -260,7 +347,15 @@ impl GoogleMcp {
     ) -> Result<String, ErrorData> {
         let session = self.resolve_session(&parts).await?;
         let client = GmailClient::new((*self.state.http).clone(), &session.access_token);
-        let (raw, thread_id) = build_outgoing_message(&client, &session.email, p.compose).await?;
+        let (raw, thread_id) = build_outgoing_message(
+            &client,
+            (*self.state.http).clone(),
+            &session.access_token,
+            self.state.config.file_jail.as_ref(),
+            &session.email,
+            p.compose,
+        )
+        .await?;
         let v = client
             .update_draft(&p.id, &raw, thread_id.as_deref())
             .await
@@ -311,7 +406,15 @@ impl GoogleMcp {
     ) -> Result<String, ErrorData> {
         let session = self.resolve_session(&parts).await?;
         let client = GmailClient::new((*self.state.http).clone(), &session.access_token);
-        let (raw, thread_id) = build_outgoing_message(&client, &session.email, p.compose).await?;
+        let (raw, thread_id) = build_outgoing_message(
+            &client,
+            (*self.state.http).clone(),
+            &session.access_token,
+            self.state.config.file_jail.as_ref(),
+            &session.email,
+            p.compose,
+        )
+        .await?;
         let v = client
             .send_message(&raw, thread_id.as_deref())
             .await
@@ -587,11 +690,57 @@ fn walk_attachments(payload: &Value, out: &mut Vec<Value>) {
     }
 }
 
+/// Look up an attachment's filename + MIME type by walking a message's MIME
+/// tree. Best-effort: returns `(None, None)` if the message can't be fetched
+/// or the attachment isn't found (the caller has fallbacks).
+async fn find_attachment_meta(
+    client: &GmailClient,
+    message_id: &str,
+    attachment_id: &str,
+) -> (Option<String>, Option<String>) {
+    let Ok(msg) = client.get_message(message_id, Some("full"), &[]).await else {
+        return (None, None);
+    };
+    let mut attachments: Vec<Value> = vec![];
+    if let Some(payload) = msg.get("payload") {
+        walk_attachments(payload, &mut attachments);
+    }
+    let pick = |a: &Value| {
+        let name = a
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let mime = a
+            .get("mimeType")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        (name, mime)
+    };
+    // Prefer an exact attachmentId match. Gmail's attachmentId isn't
+    // guaranteed stable across separate get_message calls, though, so fall
+    // back to the sole attachment when the message has exactly one.
+    if let Some(a) = attachments
+        .iter()
+        .find(|a| a.get("attachmentId").and_then(|v| v.as_str()) == Some(attachment_id))
+    {
+        return pick(a);
+    }
+    if attachments.len() == 1 {
+        return pick(&attachments[0]);
+    }
+    (None, None)
+}
+
 /// Build the outgoing RFC 5322 message + threadId for send/draft tools.
 /// When `reply_to_message_id` is set, fetches the original's headers to
 /// build a properly threaded reply.
 async fn build_outgoing_message(
     client: &GmailClient,
+    http: reqwest::Client,
+    access_token: &str,
+    jail: Option<&FileJail>,
     from_email: &str,
     p: GmailComposeParams,
 ) -> Result<(String, Option<String>), ErrorData> {
@@ -669,10 +818,12 @@ async fn build_outgoing_message(
         });
     }
 
-    // Resolve attachments first (fail fast on bad inputs).
+    // Resolve attachments first (fail fast on bad inputs). Bytes come from a
+    // local path (via the FILE_ROOT jail), a Drive file (fetched server-side),
+    // or inline base64 — never routing a Drive/local file through the model.
     let mut attachments: Vec<ResolvedAttachment> = Vec::with_capacity(p.attachments.len());
     for a in p.attachments {
-        attachments.push(ResolvedAttachment::from_input(a).map_err(to_mcp)?);
+        attachments.push(resolve_attachment(a, jail, &http, access_token).await?);
     }
     attachments_total_size_check(&attachments)?;
 
@@ -692,6 +843,92 @@ async fn build_outgoing_message(
     };
     let raw = crate::mime::compose_for_gmail(compose_req).map_err(to_mcp)?;
     Ok((raw, thread_id))
+}
+
+/// Resolve one attachment's bytes from its (single) source. Local paths go
+/// through the FILE_ROOT jail; Drive files are fetched server-side; base64 is
+/// the remote-client fallback. None of these route file bytes through the
+/// model's context except the caller-supplied base64.
+async fn resolve_attachment(
+    att: AttachmentInput,
+    jail: Option<&FileJail>,
+    http: &reqwest::Client,
+    access_token: &str,
+) -> Result<ResolvedAttachment, ErrorData> {
+    let source = att.source().map_err(to_mcp)?;
+    match source {
+        AttachmentSource::Base64(b64) => {
+            let bytes = crate::mime::decode_base64(b64).map_err(to_mcp)?;
+            ResolvedAttachment::from_bytes(att.filename.clone(), att.mime_type.clone(), bytes)
+                .map_err(to_mcp)
+        }
+        AttachmentSource::Path(path) => {
+            let jail = jail.ok_or_else(file_exchange_disabled)?;
+            let bytes = jail.read(path).map_err(to_mcp)?;
+            // Default the filename to the file's base name when unspecified.
+            let filename = att.filename.clone().or_else(|| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            });
+            ResolvedAttachment::from_bytes(filename, att.mime_type.clone(), bytes).map_err(to_mcp)
+        }
+        AttachmentSource::Drive(file_id) => {
+            let drive = DriveClient::new(http.clone(), access_token.to_string());
+            // Fetch a good filename/mime from metadata when the caller didn't
+            // provide one, then pull the bytes.
+            let mut filename = att.filename.clone();
+            let mut mime_type = att.mime_type.clone();
+            if filename.is_none() || mime_type.is_none() {
+                if let Ok(meta) = drive.get_file(file_id, Some("name,mimeType"), true).await {
+                    if filename.is_none() {
+                        filename = meta
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                    }
+                    if mime_type.is_none() {
+                        mime_type = meta
+                            .get("mimeType")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                    }
+                }
+            }
+            let (ct, bytes) = drive
+                .download_file(file_id)
+                .await
+                .map_err(|e| reclassify_drive_attachment(e, file_id))?;
+            let mime_type = mime_type.or(Some(ct));
+            ResolvedAttachment::from_bytes(filename, mime_type, bytes).map_err(to_mcp)
+        }
+    }
+}
+
+/// Error for when a tool needs FILE_ROOT but the operator hasn't enabled it.
+fn file_exchange_disabled() -> ErrorData {
+    McpError::invalid_input(
+        "this server has no file-exchange directory configured (FILE_ROOT unset), so `path` \
+         cannot be used",
+    )
+    .with_hint(
+        "Provide the bytes via `data_base64` instead, or ask the operator to set FILE_ROOT and \
+         bind-mount it into the container.",
+    )
+    .into()
+}
+
+/// Reclassify a Drive error hit while pulling attachment bytes so a bad
+/// `drive_file_id` reports as a not-found file, not an opaque 500.
+fn reclassify_drive_attachment(e: crate::google::drive::DriveError, id: &str) -> ErrorData {
+    use crate::google::drive::DriveError;
+    if let DriveError::Api { status, .. } = &e
+        && status.as_u16() == 404
+    {
+        return McpError::not_found("file", id, "drive").into();
+    }
+    to_mcp(e)
 }
 
 /// Check the total attachment payload up front so we can return a clear

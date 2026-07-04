@@ -2,6 +2,7 @@ use std::fmt;
 use std::net::IpAddr;
 
 use crate::domain::{self, Domain};
+use crate::files::FileJail;
 
 /// Operator-supplied configuration loaded from the environment at startup.
 ///
@@ -19,6 +20,10 @@ pub struct ServerConfig {
     pub database_url: String,
     pub cors_allow_localhost: bool,
     pub enabled_domains: Vec<Domain>,
+    /// Jailed host directory for filesystem-based file exchange. `Some` when
+    /// `FILE_ROOT` is set (and bind-mounted into the container); `None`
+    /// disables path-based reads/writes so tools fall back to base64.
+    pub file_jail: Option<FileJail>,
 }
 
 impl ServerConfig {
@@ -67,6 +72,9 @@ impl ServerConfig {
         let enabled_domains = domain::parse_enabled(optional_env("ENABLED_DOMAINS").as_deref())
             .map_err(ConfigError::InvalidDomain)?;
 
+        let file_jail = FileJail::from_env(optional_env("FILE_ROOT").as_deref())
+            .map_err(|e| ConfigError::InvalidFileRoot(e.to_string()))?;
+
         Ok(Self {
             host,
             port,
@@ -78,6 +86,7 @@ impl ServerConfig {
             database_url,
             cors_allow_localhost,
             enabled_domains,
+            file_jail,
         })
     }
 
@@ -121,6 +130,8 @@ pub enum ConfigError {
     Invalid(&'static str),
     #[error("invalid env var ENABLED_DOMAINS: {0}")]
     InvalidDomain(String),
+    #[error("invalid env var FILE_ROOT: {0}")]
+    InvalidFileRoot(String),
 }
 
 impl fmt::Debug for ServerConfig {
@@ -136,6 +147,7 @@ impl fmt::Debug for ServerConfig {
             .field("database_url", &self.database_url)
             .field("cors_allow_localhost", &self.cors_allow_localhost)
             .field("enabled_domains", &self.enabled_domains)
+            .field("file_jail", &self.file_jail)
             .finish()
     }
 }

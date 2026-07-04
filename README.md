@@ -145,6 +145,31 @@ Two things shrink in lockstep:
 
 Domain names are case-insensitive and whitespace-trimmed (`Gmail`, `GMAIL`, `gmail ` all parse the same). Unset, empty, or `ENABLED_DOMAINS=` reverts to the full surface (backwards-compatible default). An unknown domain name fails fast at startup with the valid list in the error message.
 
+## File handling (attachments, uploads, downloads)
+
+Moving binary files through an MCP tool call means base64 — which inflates size ~33% and, worse, drags the whole blob through the model's context in both directions. Models are unreliable at emitting/parsing multi-megabyte base64. Because this server is designed to run on the **same machine** as its MCP client, it offers a far better path: a **shared filesystem exchange**.
+
+Set `FILE_ROOT` to a directory and bind-mount it into the container **at the same absolute path** (the provided `docker-compose.yml` does this automatically). Then file tools can name files by path — bytes never touch the model's context:
+
+| Instead of base64… | Do this |
+| --- | --- |
+| Attach a local file to an email | `gmail_send attachments=[{ "path": "<FILE_ROOT>/report.pdf" }]` |
+| Save an email attachment to disk | `gmail_download_attachment dest_path="<FILE_ROOT>/in.pdf"` |
+| Upload a local file to Drive | `drive_create_file path="<FILE_ROOT>/report.pdf"` |
+| Download a Drive file to disk | `drive_download_file dest_path="<FILE_ROOT>/out.pdf"` |
+| Export a Google Doc to disk | `drive_export_file dest_path="<FILE_ROOT>/doc.pdf"` |
+
+It also does **server-side transfers** so bytes move Google↔Google without a round-trip through the model at all:
+
+| Task | Do this |
+| --- | --- |
+| Attach a Drive file to an email | `gmail_send attachments=[{ "drive_file_id": "1AbC…" }]` |
+| Save an email attachment to Drive | `gmail_download_attachment to_drive_folder_id="root"` |
+
+**Safety & semantics.** Every path is confined to `FILE_ROOT` — absolute paths must live under it, relative paths resolve against it, and `..`/symlink escapes are rejected. `mime_type` is inferred from the filename when omitted. When `FILE_ROOT` is set, oversized downloads (>8 MB) refuse to return inline base64 and point you at `dest_path`. Leaving `FILE_ROOT` unset disables path-based exchange entirely and every tool falls back to base64 — so remote deployments still work, they just pay the base64 tax.
+
+**Permissions.** The container runs as uid 65532, so the exchange directory must be writable by that uid — `chmod 0777 ~/.google-mcp/exchange` on a single-user workstation, or pre-create it owned by 65532. Files the server writes will be owned by 65532 on the host.
+
 ## Tools
 
 ### Gmail (25)

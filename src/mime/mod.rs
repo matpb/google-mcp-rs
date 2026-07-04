@@ -36,18 +36,62 @@ pub struct Recipient {
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct AttachmentInput {
-    pub filename: String,
-    /// MIME type (e.g. `application/pdf`). Defaults to `application/octet-stream`.
+    /// Attachment file name. Optional when `path` or `drive_file_id` is used
+    /// (the name is derived from the path / Drive metadata); required for
+    /// `data_base64`.
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// MIME type (e.g. `application/pdf`). Inferred from the filename when
+    /// omitted; defaults to `application/octet-stream`.
     #[serde(default)]
     pub mime_type: Option<String>,
-    /// Base64-encoded bytes (standard or url-safe). Mutually exclusive with `path`.
+    /// Base64-encoded bytes (standard or url-safe). Fallback transport for
+    /// remote clients — prefer `path` on a local deployment.
     #[serde(default)]
     pub data_base64: Option<String>,
-    /// Server-side absolute path to read the attachment from. Mutually
-    /// exclusive with `data_base64`. Useful when an MCP client has the
-    /// file on the same machine as this server.
+    /// Path to read the attachment from, inside the server's FILE_ROOT
+    /// exchange directory (absolute under it, or relative to it). The
+    /// preferred, token-free way to attach a local file. Requires the
+    /// operator to have enabled FILE_ROOT.
     #[serde(default)]
     pub path: Option<String>,
+    /// Drive file ID to attach directly. The server downloads the bytes
+    /// itself, so nothing travels through the model's context. Great for
+    /// "attach this Drive file to the email".
+    #[serde(default)]
+    pub drive_file_id: Option<String>,
+}
+
+/// Which single source an [`AttachmentInput`] draws its bytes from.
+#[derive(Debug)]
+pub enum AttachmentSource<'a> {
+    Base64(&'a str),
+    Path(&'a str),
+    Drive(&'a str),
+}
+
+impl AttachmentInput {
+    /// Determine the (exactly one) byte source. Errors if zero or more than
+    /// one of `data_base64` / `path` / `drive_file_id` is provided.
+    pub fn source(&self) -> Result<AttachmentSource<'_>, MimeError> {
+        let present: Vec<AttachmentSource<'_>> = [
+            self.data_base64.as_deref().map(AttachmentSource::Base64),
+            self.path.as_deref().map(AttachmentSource::Path),
+            self.drive_file_id.as_deref().map(AttachmentSource::Drive),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        match present.len() {
+            1 => Ok(present.into_iter().next().unwrap()),
+            0 => Err(MimeError::Build(
+                "attachment needs exactly one source: data_base64, path, or drive_file_id".into(),
+            )),
+            _ => Err(MimeError::Build(
+                "attachment sources are mutually exclusive: set only one of data_base64, path, drive_file_id".into(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -83,38 +127,32 @@ pub struct ResolvedAttachment {
 }
 
 impl ResolvedAttachment {
-    pub fn from_input(att: AttachmentInput) -> Result<Self, MimeError> {
-        let mime_type = att
-            .mime_type
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-        let bytes = match (att.data_base64, att.path) {
-            (Some(_), Some(_)) => {
-                return Err(MimeError::Build(
-                    "attachment.data_base64 and attachment.path are mutually exclusive".into(),
-                ));
-            }
-            (Some(b64), None) => decode_base64(&b64)?,
-            (None, Some(path)) => std::fs::read(&path).map_err(|e| {
-                MimeError::Build(format!("could not read attachment file {path}: {e}"))
-            })?,
-            (None, None) => {
-                return Err(MimeError::Build(
-                    "attachment requires data_base64 or path".into(),
-                ));
-            }
-        };
+    /// Build a resolved attachment from already-fetched bytes. `filename`
+    /// falls back to a generic name; `mime_type` is inferred from the
+    /// filename when `None`. Enforces the size cap.
+    pub fn from_bytes(
+        filename: Option<String>,
+        mime_type: Option<String>,
+        bytes: Vec<u8>,
+    ) -> Result<Self, MimeError> {
         if bytes.len() > MAX_MESSAGE_BYTES {
             return Err(MimeError::AttachmentTooLarge);
         }
+        let filename = filename
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "attachment".to_string());
+        let mime_type = mime_type
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| crate::files::guess_mime(&filename).to_string());
         Ok(Self {
-            filename: att.filename,
+            filename,
             mime_type,
             bytes,
         })
     }
 }
 
-fn decode_base64(s: &str) -> Result<Vec<u8>, MimeError> {
+pub fn decode_base64(s: &str) -> Result<Vec<u8>, MimeError> {
     use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE};
     let trimmed = s.trim();
     URL_SAFE_NO_PAD
@@ -404,13 +442,18 @@ mod tests {
     fn attachment_via_base64_round_trips() {
         let payload = b"hello-attachment".to_vec();
         let b64 = URL_SAFE_NO_PAD.encode(&payload);
-        let att = ResolvedAttachment::from_input(AttachmentInput {
-            filename: "f.txt".into(),
+        let att_in = AttachmentInput {
+            filename: Some("f.txt".into()),
             mime_type: Some("text/plain".into()),
             data_base64: Some(b64),
             path: None,
-        })
-        .unwrap();
+            drive_file_id: None,
+        };
+        let bytes = match att_in.source().unwrap() {
+            AttachmentSource::Base64(b) => decode_base64(b).unwrap(),
+            _ => panic!("expected base64 source"),
+        };
+        let att = ResolvedAttachment::from_bytes(att_in.filename, att_in.mime_type, bytes).unwrap();
         assert_eq!(att.bytes, payload);
 
         let s = as_string(Compose {
@@ -422,27 +465,38 @@ mod tests {
     }
 
     #[test]
-    fn attachment_path_and_b64_mutually_exclusive() {
-        let err = ResolvedAttachment::from_input(AttachmentInput {
-            filename: "f".into(),
+    fn attachment_sources_mutually_exclusive() {
+        let err = AttachmentInput {
+            filename: Some("f".into()),
             mime_type: None,
             data_base64: Some("aGk=".into()),
             path: Some("/tmp/x".into()),
-        })
+            drive_file_id: None,
+        }
+        .source()
         .unwrap_err();
         assert!(matches!(err, MimeError::Build(_)));
     }
 
     #[test]
     fn attachment_requires_one_source() {
-        let err = ResolvedAttachment::from_input(AttachmentInput {
-            filename: "f".into(),
+        let err = AttachmentInput {
+            filename: Some("f".into()),
             mime_type: None,
             data_base64: None,
             path: None,
-        })
+            drive_file_id: None,
+        }
+        .source()
         .unwrap_err();
         assert!(matches!(err, MimeError::Build(_)));
+    }
+
+    #[test]
+    fn from_bytes_infers_mime_from_filename() {
+        let att = ResolvedAttachment::from_bytes(Some("report.pdf".into()), None, b"%PDF".to_vec())
+            .unwrap();
+        assert_eq!(att.mime_type, "application/pdf");
     }
 
     #[test]

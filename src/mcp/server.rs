@@ -107,6 +107,7 @@ mod harness {
             database_url: ":memory:".to_string(),
             cors_allow_localhost: false,
             enabled_domains,
+            file_jail: None,
         });
         let state = AppState {
             config,

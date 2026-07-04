@@ -18,8 +18,17 @@ services:
       STORAGE_ENCRYPTION_KEY: "${STORAGE_ENCRYPTION_KEY}"
       DATABASE_URL: "/data/google-mcp.db"
       RUST_LOG: "${RUST_LOG:-google_mcp=info,rmcp=warn,reqwest=warn}"
+      # File-exchange root. Bind-mounted below at the SAME absolute path so
+      # the MCP client (on the host) and this server (in the container) name
+      # files identically — no path translation. Unset FILE_ROOT to disable
+      # filesystem file exchange and fall back to base64 only.
+      FILE_ROOT: "${FILE_ROOT:-/srv/google-mcp/exchange}"
     volumes:
       - google-mcp-data:/data
+      # Host <-> container file exchange, mounted at the identical path.
+      # The container runs as uid 65532, so this directory must be writable
+      # by that uid (e.g. `chmod 0777`, or pre-create it owned by 65532).
+      - "${FILE_ROOT:-/srv/google-mcp/exchange}:${FILE_ROOT:-/srv/google-mcp/exchange}"
 
 volumes:
   google-mcp-data:

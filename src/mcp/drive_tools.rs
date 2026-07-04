@@ -11,6 +11,7 @@ use rmcp::{ErrorData, tool, tool_router};
 use serde_json::json;
 
 use crate::errors::{McpError, to_mcp};
+use crate::files::{FileJail, INLINE_MAX_BYTES, guess_mime};
 use crate::google::drive::{DriveClient, DriveError};
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
@@ -93,21 +94,27 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_create_file",
-        description = "Upload a new file to Drive. Provide `mime_type` and base64-encoded content. Multipart upload — keep payload below ~5 MB; for larger files use a follow-up resumable-upload tool (not yet wired)."
+        description = "Upload a new file to Drive. Content comes from `path` (preferred — a file inside the server's FILE_ROOT exchange dir) OR `data_base64` (fallback). `mime_type` is inferred from the name/path when omitted. Multipart upload — keep payload below ~5 MB; for larger files use a follow-up resumable-upload tool (not yet wired)."
     )]
     async fn drive_create_file(
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveCreateFileParams>,
     ) -> Result<String, ErrorData> {
-        // Validate inputs before resolving the session so a bad base64
-        // payload doesn't have to wait on a Google round-trip to surface.
-        let bytes = decode_b64(&p.data_base64)?;
+        // Validate inputs before resolving the session so a bad payload
+        // doesn't have to wait on a Google round-trip to surface.
+        let (bytes, mime) = resolve_upload_content(
+            self.state.config.file_jail.as_ref(),
+            p.path.as_deref(),
+            p.data_base64.as_deref(),
+            p.mime_type.as_deref(),
+            &p.name,
+        )?;
         let session = self.resolve_session(&parts).await?;
         let client = DriveClient::new((*self.state.http).clone(), session.access_token);
         let mut metadata = json!({
             "name": p.name,
-            "mimeType": p.mime_type,
+            "mimeType": mime,
         });
         if let Some(parent) = p.parent_id {
             metadata["parents"] = json!([parent]);
@@ -116,7 +123,7 @@ impl GoogleMcp {
             metadata["description"] = json!(d);
         }
         client
-            .create_with_content(&metadata, &bytes, &p.mime_type)
+            .create_with_content(&metadata, &bytes, &mime)
             .await
             .map(|v| v.to_string())
             .map_err(to_mcp)
@@ -164,11 +171,19 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveUpdateContentParams>,
     ) -> Result<String, ErrorData> {
-        let bytes = decode_b64(&p.data_base64)?;
+        let (bytes, mime) = resolve_upload_content(
+            self.state.config.file_jail.as_ref(),
+            p.path.as_deref(),
+            p.data_base64.as_deref(),
+            p.mime_type.as_deref(),
+            // No name to infer from; fall back to octet-stream when neither a
+            // mime_type nor a path extension is available.
+            p.path.as_deref().unwrap_or(""),
+        )?;
         let session = self.resolve_session(&parts).await?;
         let client = DriveClient::new((*self.state.http).clone(), session.access_token);
         client
-            .update_content(&p.file_id, &bytes, &p.mime_type)
+            .update_content(&p.file_id, &bytes, &mime)
             .await
             .map(|v| v.to_string())
             .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
@@ -176,7 +191,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_download_file",
-        description = "Download a file's binary bytes. Returns `{ contentType, sizeBytes, data: <base64 std> }`. For Google Docs/Sheets/Slides, use `drive_export_file` instead — they have no native bytes."
+        description = "Download a file's binary bytes. Preferred: set `dest_path` (inside FILE_ROOT) to write the bytes to disk and get `{ path, sizeBytes, contentType }` back — nothing enters the model's context. Without `dest_path`, returns `{ contentType, sizeBytes, data: <base64 std> }` (capped when a file-exchange dir is available). For Google Docs/Sheets/Slides, use `drive_export_file` instead — they have no native bytes."
     )]
     async fn drive_download_file(
         &self,
@@ -189,13 +204,12 @@ impl GoogleMcp {
             .download_file(&p.file_id)
             .await
             .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))?;
-        let b64 = STANDARD.encode(&bytes);
-        Ok(json!({
-            "contentType": ct,
-            "sizeBytes": bytes.len(),
-            "data": b64,
-        })
-        .to_string())
+        deliver_bytes(
+            self.state.config.file_jail.as_ref(),
+            p.dest_path.as_deref(),
+            &ct,
+            &bytes,
+        )
     }
 
     #[tool(
@@ -213,13 +227,12 @@ impl GoogleMcp {
             .export_file(&p.file_id, &p.export_mime_type)
             .await
             .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))?;
-        let b64 = STANDARD.encode(&bytes);
-        Ok(json!({
-            "contentType": ct,
-            "sizeBytes": bytes.len(),
-            "data": b64,
-        })
-        .to_string())
+        deliver_bytes(
+            self.state.config.file_jail.as_ref(),
+            p.dest_path.as_deref(),
+            &ct,
+            &bytes,
+        )
     }
 
     #[tool(
@@ -402,6 +415,91 @@ fn validate_share(p: &DriveSharePermissionParams) -> Result<(), ErrorData> {
     Ok(())
 }
 
+/// Error for when a tool needs FILE_ROOT but the operator hasn't enabled it.
+fn no_file_root(what: &str) -> ErrorData {
+    McpError::invalid_input(format!(
+        "this server has no file-exchange directory configured (FILE_ROOT unset), so `{what}` cannot be used"
+    ))
+    .with_hint(
+        "Use base64 instead, or ask the operator to set FILE_ROOT and bind-mount it into the container.",
+    )
+    .into()
+}
+
+/// Resolve upload content + effective MIME from exactly one of `path`
+/// (via the FILE_ROOT jail) or `data_base64`. `name_for_mime` is the file
+/// name/path used to infer a MIME type when none was supplied.
+fn resolve_upload_content(
+    jail: Option<&FileJail>,
+    path: Option<&str>,
+    data_base64: Option<&str>,
+    mime_type: Option<&str>,
+    name_for_mime: &str,
+) -> Result<(Vec<u8>, String), ErrorData> {
+    match (path, data_base64) {
+        (Some(_), Some(_)) => Err(McpError::invalid_input(
+            "`path` and `data_base64` are mutually exclusive — provide exactly one",
+        )
+        .into()),
+        (None, None) => Err(McpError::invalid_input(
+            "provide file content via `path` (preferred) or `data_base64`",
+        )
+        .into()),
+        (Some(p), None) => {
+            let jail = jail.ok_or_else(|| no_file_root("path"))?;
+            let bytes = jail.read(p).map_err(to_mcp)?;
+            let mime = mime_type
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| guess_mime(p).to_string());
+            Ok((bytes, mime))
+        }
+        (None, Some(b64)) => {
+            let bytes = decode_b64(b64)?;
+            let mime = mime_type
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| guess_mime(name_for_mime).to_string());
+            Ok((bytes, mime))
+        }
+    }
+}
+
+/// Deliver downloaded/exported bytes to the caller: write to `dest_path`
+/// inside the jail (returning a path), or return base64 inline (guarded by
+/// `INLINE_MAX_BYTES` when a jail alternative exists).
+fn deliver_bytes(
+    jail: Option<&FileJail>,
+    dest_path: Option<&str>,
+    content_type: &str,
+    bytes: &[u8],
+) -> Result<String, ErrorData> {
+    if let Some(dest) = dest_path {
+        let jail = jail.ok_or_else(|| no_file_root("dest_path"))?;
+        let written = jail.write(dest, bytes).map_err(to_mcp)?;
+        return Ok(json!({
+            "path": written.display().to_string(),
+            "sizeBytes": bytes.len(),
+            "contentType": content_type,
+        })
+        .to_string());
+    }
+    if jail.is_some() && bytes.len() > INLINE_MAX_BYTES {
+        return Err(McpError::invalid_input(format!(
+            "file is {} bytes — too large to return inline as base64",
+            bytes.len()
+        ))
+        .with_hint("Pass `dest_path` (inside FILE_ROOT) to write it to disk instead.")
+        .into());
+    }
+    Ok(json!({
+        "contentType": content_type,
+        "sizeBytes": bytes.len(),
+        "data": STANDARD.encode(bytes),
+    })
+    .to_string())
+}
+
 fn decode_b64(s: &str) -> Result<Vec<u8>, ErrorData> {
     let trimmed = s.trim();
     URL_SAFE_NO_PAD
@@ -410,4 +508,90 @@ fn decode_b64(s: &str) -> Result<Vec<u8>, ErrorData> {
         .or_else(|_| STANDARD.decode(trimmed))
         .or_else(|_| STANDARD_NO_PAD.decode(trimmed.trim_end_matches('=')))
         .map_err(|e| ErrorData::invalid_params(format!("base64 decode: {e}"), None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn temp_jail() -> FileJail {
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let id = CTR.fetch_add(1, Ordering::Relaxed);
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("gmcp-drive-test-{}-{}", std::process::id(), id));
+        FileJail::from_env(Some(dir.to_str().unwrap()))
+            .unwrap()
+            .unwrap()
+    }
+
+    fn parse(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn resolve_upload_from_base64_infers_mime_from_name() {
+        let b64 = STANDARD.encode(b"hello");
+        let (bytes, mime) =
+            resolve_upload_content(None, None, Some(&b64), None, "notes.txt").unwrap();
+        assert_eq!(bytes, b"hello");
+        assert_eq!(mime, "text/plain");
+    }
+
+    #[test]
+    fn resolve_upload_from_path_uses_jail() {
+        let jail = temp_jail();
+        jail.write("doc.pdf", b"%PDF-1.7").unwrap();
+        let (bytes, mime) =
+            resolve_upload_content(Some(&jail), Some("doc.pdf"), None, None, "doc.pdf").unwrap();
+        assert_eq!(bytes, b"%PDF-1.7");
+        assert_eq!(mime, "application/pdf");
+    }
+
+    #[test]
+    fn resolve_upload_path_without_jail_errors() {
+        let err = resolve_upload_content(None, Some("x.txt"), None, None, "x.txt").unwrap_err();
+        // FILE_ROOT unset -> clear guidance, not a panic.
+        assert!(err.message.contains("FILE_ROOT"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn resolve_upload_rejects_both_and_neither() {
+        let b64 = STANDARD.encode(b"x");
+        assert!(resolve_upload_content(None, Some("x"), Some(&b64), None, "x").is_err());
+        assert!(resolve_upload_content(None, None, None, None, "x").is_err());
+    }
+
+    #[test]
+    fn deliver_writes_to_dest_path() {
+        let jail = temp_jail();
+        let out = deliver_bytes(Some(&jail), Some("out.bin"), "application/octet-stream", b"data");
+        let v = parse(&out.unwrap());
+        assert_eq!(v["sizeBytes"], 4);
+        let path = v["path"].as_str().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"data");
+        assert!(v.get("data").is_none(), "no base64 when writing to disk");
+    }
+
+    #[test]
+    fn deliver_inline_base64_when_no_dest() {
+        let out = deliver_bytes(None, None, "text/plain", b"hi").unwrap();
+        let v = parse(&out);
+        assert_eq!(v["data"], STANDARD.encode(b"hi"));
+    }
+
+    #[test]
+    fn deliver_refuses_huge_inline_when_jail_available() {
+        let jail = temp_jail();
+        let big = vec![0u8; INLINE_MAX_BYTES + 1];
+        let err = deliver_bytes(Some(&jail), None, "application/octet-stream", &big).unwrap_err();
+        assert!(err.message.contains("too large"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn deliver_allows_huge_inline_when_no_jail() {
+        // Without a jail there's no dest_path alternative, so we must not block.
+        let big = vec![0u8; INLINE_MAX_BYTES + 1];
+        assert!(deliver_bytes(None, None, "application/octet-stream", &big).is_ok());
+    }
 }

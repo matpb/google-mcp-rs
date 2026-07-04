@@ -294,6 +294,24 @@ impl From<DriveError> for McpError {
     }
 }
 
+impl From<crate::files::FileError> for McpError {
+    fn from(e: crate::files::FileError) -> Self {
+        use crate::files::FileError;
+        match e {
+            FileError::Disabled => McpError::invalid_input(e.to_string()).with_hint(
+                "Ask the operator to set FILE_ROOT and bind-mount it, or pass bytes as base64.",
+            ),
+            FileError::Escape { .. } => McpError::invalid_input(e.to_string()).with_hint(
+                "Use a path inside the server's file-exchange directory (FILE_ROOT).",
+            ),
+            FileError::NotFound(_) => McpError::invalid_input(e.to_string())
+                .with_hint("Check the path is spelled correctly and the file exists in the exchange directory."),
+            FileError::NotAFile(_) => McpError::invalid_input(e.to_string()),
+            FileError::Io { .. } => McpError::internal(e.to_string()).with_service("files"),
+        }
+    }
+}
+
 impl From<CalendarError> for McpError {
     fn from(e: CalendarError) -> Self {
         match e {

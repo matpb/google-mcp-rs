@@ -92,6 +92,20 @@ pub struct GmailListAttachmentsParams {
 pub struct GmailDownloadAttachmentParams {
     pub message_id: String,
     pub attachment_id: String,
+    /// Preferred: write the decoded bytes to this path inside the server's
+    /// FILE_ROOT exchange directory and return `{ path, sizeBytes, filename,
+    /// mimeType }` instead of base64. Nothing enters the model's context.
+    #[serde(default)]
+    pub dest_path: Option<String>,
+    /// Alternative: push the attachment straight into Google Drive. Set to a
+    /// Drive folder ID, or `"root"` for My Drive. Returns the new Drive file's
+    /// metadata. Bytes move Gmail -> Drive server-side.
+    #[serde(default)]
+    pub to_drive_folder_id: Option<String>,
+    /// Optional filename override (used for `dest_path`'s Drive upload name /
+    /// returned metadata). Inferred from the message when omitted.
+    #[serde(default)]
+    pub filename: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -450,9 +464,17 @@ pub struct DriveCreateFolderParams {
 pub struct DriveCreateFileParams {
     pub name: String,
     /// MIME type for the upload (e.g. `text/plain`, `application/pdf`).
-    pub mime_type: String,
-    /// Base64-encoded file content.
-    pub data_base64: String,
+    /// Inferred from `name`/`path` when omitted.
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    /// File content as base64. Fallback transport — prefer `path` locally.
+    /// Exactly one of `data_base64` / `path` is required.
+    #[serde(default)]
+    pub data_base64: Option<String>,
+    /// Preferred: read the content from this path inside the server's
+    /// FILE_ROOT exchange directory. No base64 through the model's context.
+    #[serde(default)]
+    pub path: Option<String>,
     /// Optional Drive folder to nest the file under.
     #[serde(default)]
     pub parent_id: Option<String>,
@@ -482,13 +504,25 @@ pub struct DriveUpdateMetadataParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DriveUpdateContentParams {
     pub file_id: String,
-    pub mime_type: String,
-    pub data_base64: String,
+    /// New content MIME type. Inferred from `path` when omitted.
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    /// New content as base64. Exactly one of `data_base64` / `path` required.
+    #[serde(default)]
+    pub data_base64: Option<String>,
+    /// Preferred: read new content from this path inside FILE_ROOT.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DriveDownloadFileParams {
     pub file_id: String,
+    /// Preferred: write the bytes to this path inside the server's FILE_ROOT
+    /// exchange directory and return `{ path, sizeBytes, contentType }`
+    /// instead of base64. Nothing enters the model's context.
+    #[serde(default)]
+    pub dest_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -498,6 +532,10 @@ pub struct DriveExportFileParams {
     /// `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`,
     /// `text/csv`, `text/markdown`.
     pub export_mime_type: String,
+    /// Preferred: write the exported bytes to this path inside FILE_ROOT and
+    /// return `{ path, sizeBytes, contentType }` instead of base64.
+    #[serde(default)]
+    pub dest_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
