@@ -2,7 +2,7 @@
 
 A multi-tenant **Model Context Protocol** server for **Google Workspace**, written in Rust. Built around streamable HTTP transport with full **OAuth 2.1** so it plugs straight into Claude.ai, Claude Code, ChatGPT custom connectors, Cursor, or any MCP client that speaks the 2025-11-25 authorization spec.
 
-> **Status:** v0.5.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) live. **76 tools** total.
+> **Status:** v0.6.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) live. **76 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 optional maintenance tools when `FILE_ROOT` is enabled.
 
 ## Why
 
@@ -126,6 +126,7 @@ For **Claude.ai / ChatGPT custom connectors / Cursor**, add a custom connector p
 | `MCP_PORT` | no | `8433` | Listen port |
 | `CORS_ALLOW_LOCALHOST` | no | `false` | Allow `http://localhost:*` in CORS (dev only) |
 | `ENABLED_DOMAINS` | no | all five | Comma-separated subset of `gmail,sheets,drive,docs,calendar`. Filters both the MCP tool surface and the OAuth scopes requested from Google. Unset = all five. See [Scoping the surface](#scoping-the-surface) below. |
+| `FILE_ROOT` | no | — (disabled) | Absolute path to the file-exchange directory, bind-mounted into the container at the same path. Enables attaching/uploading by `path` and saving downloads by `dest_path` instead of base64, plus the `files_info` / `files_cleanup` tools. Unset = base64-only. See [File handling](#file-handling-attachments-uploads-downloads) below. |
 | `RUST_LOG` | no | `google_mcp=info,rmcp=warn,reqwest=warn` | Tracing filter — keep `reqwest` ≤ `warn` to avoid logging URLs with PII |
 
 ## Scoping the surface
@@ -168,7 +169,7 @@ It also does **server-side transfers** so bytes move Google↔Google without a r
 
 **Safety & semantics.** Every path is confined to `FILE_ROOT` — absolute paths must live under it, relative paths resolve against it, and `..`/symlink escapes are rejected. `mime_type` is inferred from the filename when omitted. When `FILE_ROOT` is set, oversized downloads (>8 MB) refuse to return inline base64 and point you at `dest_path`. Leaving `FILE_ROOT` unset disables path-based exchange entirely and every tool falls back to base64 — so remote deployments still work, they just pay the base64 tax.
 
-**Permissions.** The container runs as uid 65532, so the exchange directory must be writable by that uid — `chmod 0777 ~/.google-mcp/exchange` on a single-user workstation, or pre-create it owned by 65532. Files the server writes will be owned by 65532 on the host.
+**Permissions.** The container runs as uid 65532, so the exchange directory must be writable by that uid. For a fresh dedicated directory, `chmod 0777 ~/.google-mcp/exchange` on a single-user workstation is simplest (or pre-create it owned by 65532). Files the server writes will be owned by 65532 on the host. If you point `FILE_ROOT` at a directory you already own (e.g. your Downloads folder, so you can attach files without copying them in), grant the container write access without opening it to the world using an ACL — `setfacl -m u:65532:rwx ~/Downloads` — or run the container as your own uid via a `docker-compose.override.yml` (`user: "1000:1000"`, after chowning the data volume). **Caveat:** whatever directory you choose becomes the scope of `files_cleanup`, so pointing `FILE_ROOT` at a busy folder like Downloads means an unfiltered `files_cleanup dry_run=false` would delete everything in it (except `keep/`) — always filter and dry-run first.
 
 **Discoverability.** When `FILE_ROOT` is set, the MCP server's `instructions` (returned on connect) include a FILE HANDLING section that states the live exchange path and these rules, so any calling agent learns the protocol without being told.
 
