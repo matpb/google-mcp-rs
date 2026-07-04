@@ -9,6 +9,7 @@ use rmcp::{ErrorData, ServerHandler, tool_handler};
 
 use crate::credentials::resolve_google;
 use crate::domain::Domain;
+use crate::files::FileJail;
 use crate::errors::to_mcp;
 use crate::google::gmail::GmailClient;
 use crate::google::session::GoogleAccountSession;
@@ -32,6 +33,12 @@ impl GoogleMcp {
         let mut tool_router = Self::router_for(first);
         for d in iter {
             tool_router += Self::router_for(d);
+        }
+        // File-exchange maintenance tools exist only when FILE_ROOT is set —
+        // they're meaningless without an exchange directory, and this keeps
+        // them out of the surface (and the schema) for base64-only deployments.
+        if state.config.file_jail.is_some() {
+            tool_router += Self::files_router();
         }
         Self { state, tool_router }
     }
@@ -119,6 +126,32 @@ mod harness {
         GoogleMcp::new(state)
     }
 
+    pub(crate) async fn make_mcp_with_jail(enabled_domains: Vec<Domain>) -> GoogleMcp {
+        let dir = std::env::temp_dir().join(format!("gmcp-router-jail-{}", std::process::id()));
+        let jail = crate::files::FileJail::from_env(Some(dir.to_str().unwrap()))
+            .unwrap()
+            .unwrap();
+        let mut mcp = make_mcp(enabled_domains.clone()).await;
+        // Rebuild with a config that has the jail set.
+        let cfg = crate::config::ServerConfig {
+            host: "127.0.0.1".parse().unwrap(),
+            port: 8433,
+            base_url: "http://localhost:8433".to_string(),
+            google_client_id: "test-cid".to_string(),
+            google_client_secret: "test-csecret".to_string(),
+            jwt_secret: vec![0u8; 32],
+            storage_encryption_key: [0u8; 32],
+            database_url: ":memory:".to_string(),
+            cors_allow_localhost: false,
+            enabled_domains,
+            file_jail: Some(jail),
+        };
+        let mut state = mcp.state.clone();
+        state.config = std::sync::Arc::new(cfg);
+        mcp = GoogleMcp::new(state);
+        mcp
+    }
+
     pub(crate) fn tool_names(mcp: &GoogleMcp) -> Vec<String> {
         mcp.tool_router
             .list_all()
@@ -146,6 +179,29 @@ mod harness {
 mod tests {
     use super::harness::*;
     use crate::domain::Domain;
+
+    #[tokio::test]
+    async fn files_tools_present_only_when_file_root_enabled() {
+        // No jail (the default harness) => no files_* tools.
+        let without = make_mcp(vec![Domain::Gmail]).await;
+        assert!(
+            !tool_names(&without).iter().any(|n| n.starts_with("files_")),
+            "files_* tools must not load without FILE_ROOT"
+        );
+        // Jail set => exactly files_info + files_cleanup appear, on top of
+        // the domain's own tools.
+        let with = make_mcp_with_jail(vec![Domain::Gmail]).await;
+        let names = tool_names(&with);
+        let files: Vec<_> = names.iter().filter(|n| n.starts_with("files_")).collect();
+        assert_eq!(files.len(), 2, "expected files_info + files_cleanup, got {files:?}");
+        assert!(names.iter().any(|n| n == "files_info"));
+        assert!(names.iter().any(|n| n == "files_cleanup"));
+        // Domain tools still present.
+        assert_eq!(
+            names.iter().filter(|n| n.starts_with("gmail_")).count(),
+            expected_count(Domain::Gmail)
+        );
+    }
 
     #[tokio::test]
     async fn each_single_domain_loads_only_its_tools() {
@@ -253,13 +309,47 @@ mod tests {
     }
 }
 
+/// Build the FILE HANDLING section of the server instructions. Includes the
+/// live exchange-directory path (when enabled) so a calling AI knows exactly
+/// where to stage files — this is the single most important thing for it to
+/// use paths instead of base64 correctly.
+fn file_handling_instructions(jail: Option<&FileJail>) -> String {
+    match jail {
+        Some(j) => {
+            let root = j.root().display();
+            format!(
+                "FILE HANDLING (READ THIS BEFORE MOVING ANY FILE — attachments, uploads, \
+                 downloads). This server exchanges file bytes by PATH via a shared directory, \
+                 which is far cheaper and more reliable than base64. The file-exchange directory \
+                 is `{root}` (same path on the host and inside the server). Rules:\n\
+                 • To ATTACH or UPLOAD a local file, the file MUST be inside `{root}`. Files \
+                 anywhere else (e.g. ~/Downloads) are REJECTED — copy them into `{root}` first, \
+                 then pass `path` (Gmail `attachments[].path`, `drive_create_file.path`, \
+                 `drive_update_content.path`). Paths may be absolute under the dir or relative to it.\n\
+                 • To SAVE an attachment or download, pass `dest_path` inside `{root}` \
+                 (`gmail_download_attachment`, `drive_download_file`, `drive_export_file`). The \
+                 bytes are written to disk and only `{{path, sizeBytes, ...}}` comes back — no base64.\n\
+                 • To move a file between Gmail and Drive WITHOUT base64, use `drive_file_id` on a \
+                 Gmail attachment, or `to_drive_folder_id` on `gmail_download_attachment`.\n\
+                 • `mime_type` is inferred from the filename when omitted.\n\
+                 • Only fall back to `data_base64` when a file genuinely can't be placed in `{root}`. \
+                 Downloads larger than 8 MB refuse to return inline — use `dest_path`."
+            )
+        }
+        None => "FILE HANDLING: the filesystem file-exchange is DISABLED on this server \
+             (FILE_ROOT is unset). Provide file bytes via `data_base64` on uploads/attachments, \
+             and downloads/attachments are returned as base64. Ask the operator to set FILE_ROOT \
+             and bind-mount it to enable path-based exchange."
+            .to_string(),
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for GoogleMcp {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
-        info.instructions = Some(
-            "Google Workspace MCP — Gmail + Sheets + Drive + Docs + Calendar. \
+        let base = "Google Workspace MCP — Gmail + Sheets + Drive + Docs + Calendar. \
              Multi-tenant: each user authorizes via the OAuth flow at \
              /authorize and the server mints an MCP JWT bound to their \
              Google sub. All tools operate on the authenticated user's \
@@ -273,9 +363,11 @@ impl ServerHandler for GoogleMcp {
              Calendar event mutations default to `send_updates=none` so \
              agents don't accidentally email guests; pass \
              `send_updates=\"all\"` when the human-facing notification \
-             is intentional."
-                .into(),
-        );
+             is intentional.";
+        info.instructions = Some(format!(
+            "{base}\n\n{}",
+            file_handling_instructions(self.state.config.file_jail.as_ref())
+        ));
         info
     }
 }

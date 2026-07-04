@@ -170,6 +170,17 @@ It also does **server-side transfers** so bytes move Google↔Google without a r
 
 **Permissions.** The container runs as uid 65532, so the exchange directory must be writable by that uid — `chmod 0777 ~/.google-mcp/exchange` on a single-user workstation, or pre-create it owned by 65532. Files the server writes will be owned by 65532 on the host.
 
+**Discoverability.** When `FILE_ROOT` is set, the MCP server's `instructions` (returned on connect) include a FILE HANDLING section that states the live exchange path and these rules, so any calling agent learns the protocol without being told.
+
+**Keeping it tidy.** The exchange directory is scratch space and accumulates over time. Two tools (present only when `FILE_ROOT` is set) let an agent or you manage it — nothing is ever deleted automatically:
+
+| Tool | Purpose |
+| --- | --- |
+| `files_info` | Report the exchange path, file count, total bytes, and a listing (oldest first). |
+| `files_cleanup` | Delete files by age (`older_than_hours`) and/or name (`name_contains`). **Defaults to `dry_run: true`** — reports what would go and removes nothing until you pass `dry_run: false`. |
+
+Anything under a `keep/` subdirectory of `FILE_ROOT` is invisible to `files_cleanup` and never deleted — put files there that you want to survive a sweep.
+
 ## Tools
 
 ### Gmail (25)

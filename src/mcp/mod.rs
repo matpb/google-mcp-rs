@@ -3,6 +3,7 @@
 pub mod calendar_tools;
 pub mod docs_tools;
 pub mod drive_tools;
+pub mod files_tools;
 pub mod gmail_tools;
 pub mod params;
 pub mod server;

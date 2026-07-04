@@ -282,6 +282,37 @@ pub struct GmailTrashParams {
 }
 
 // ===========================================================================
+// Files (file-exchange directory maintenance) — only present when FILE_ROOT
+// is enabled.
+// ===========================================================================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FilesInfoParams {
+    /// Cap on the number of files listed (newest-first by default is not
+    /// applied; entries are returned oldest-first so stale files surface).
+    /// Default 100.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FilesCleanupParams {
+    /// Only select files older than this many hours (by modified time).
+    /// Omit to select regardless of age.
+    #[serde(default)]
+    pub older_than_hours: Option<f64>,
+    /// Only select files whose name contains this substring (case-insensitive).
+    /// Omit to select regardless of name.
+    #[serde(default)]
+    pub name_contains: Option<String>,
+    /// SAFETY: defaults to `true` — a dry run that only REPORTS what would be
+    /// deleted and removes nothing. Pass `false` to actually delete. Files in
+    /// the reserved `keep/` subdirectory are never deleted.
+    #[serde(default = "default_true")]
+    pub dry_run: bool,
+}
+
+// ===========================================================================
 // Sheets
 // ===========================================================================
 

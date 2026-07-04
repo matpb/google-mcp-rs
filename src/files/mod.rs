@@ -14,6 +14,7 @@
 //! canonicalizing before the containment check.
 
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 /// Above this many raw bytes, returning a download inline as base64 would
 /// bloat the model's context. When a FILE_ROOT jail is available (so the
@@ -181,6 +182,131 @@ impl FileJail {
         })?;
         Ok(path)
     }
+
+    /// List every regular file under the root (recursively), skipping the
+    /// reserved `keep/` subtree and any symlinks. Used by the `files_info` /
+    /// `files_cleanup` tools.
+    pub fn scan(&self) -> Result<Vec<DirEntryInfo>, FileError> {
+        let mut out = Vec::new();
+        scan_dir(&self.root, &self.root, &mut out)?;
+        Ok(out)
+    }
+
+    /// Delete a single regular file, but only if it resolves inside the root
+    /// and isn't in the reserved `keep/` subtree. Returns the bytes freed.
+    pub fn remove_file(&self, path: &Path) -> Result<u64, FileError> {
+        let canon = std::fs::canonicalize(path).map_err(|e| FileError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+        if !canon.starts_with(&self.root) {
+            return Err(FileError::Escape {
+                path: path.display().to_string(),
+                root: self.root.display().to_string(),
+            });
+        }
+        if is_in_keep(&self.root, &canon) {
+            return Err(FileError::Io {
+                path: path.display().to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "refusing to delete inside the reserved keep/ subdirectory",
+                ),
+            });
+        }
+        let size = std::fs::metadata(&canon).map(|m| m.len()).unwrap_or(0);
+        std::fs::remove_file(&canon).map_err(|e| FileError::Io {
+            path: canon.display().to_string(),
+            source: e,
+        })?;
+        Ok(size)
+    }
+}
+
+/// Metadata for one file found by [`FileJail::scan`].
+#[derive(Debug, Clone)]
+pub struct DirEntryInfo {
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified: SystemTime,
+}
+
+/// True if `path` lies within a top-level `keep/` directory under `root`.
+fn is_in_keep(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .map(|c| c.as_os_str() == "keep")
+        .unwrap_or(false)
+}
+
+fn scan_dir(root: &Path, dir: &Path, out: &mut Vec<DirEntryInfo>) -> Result<(), FileError> {
+    let rd = std::fs::read_dir(dir).map_err(|e| FileError::Io {
+        path: dir.display().to_string(),
+        source: e,
+    })?;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        // Never follow symlinks (defends against escapes) and skip the
+        // reserved keep/ subtree entirely.
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if is_in_keep(root, &path) {
+            continue;
+        }
+        if meta.is_dir() {
+            scan_dir(root, &path, out)?;
+        } else if meta.is_file() {
+            out.push(DirEntryInfo {
+                path,
+                size: meta.len(),
+                modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Select which scanned entries a cleanup would remove. Pure (takes `now`
+/// explicitly) so it's deterministic to test. An entry is selected when it
+/// passes BOTH filters that are present: age older than `older_than_secs`,
+/// and name containing `name_contains` (case-insensitive). With neither
+/// filter, every entry is selected.
+pub fn plan_delete<'a>(
+    entries: &'a [DirEntryInfo],
+    now: SystemTime,
+    older_than_secs: Option<u64>,
+    name_contains: Option<&str>,
+) -> Vec<&'a DirEntryInfo> {
+    let needle = name_contains.map(|s| s.to_ascii_lowercase());
+    entries
+        .iter()
+        .filter(|e| {
+            if let Some(min_age) = older_than_secs {
+                let age = now
+                    .duration_since(e.modified)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if age < min_age {
+                    return false;
+                }
+            }
+            if let Some(n) = &needle {
+                let name = e
+                    .path
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !name.contains(n) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
 }
 
 /// Lexically normalize a path (resolve `.` and `..` textually, without
@@ -356,6 +482,74 @@ mod tests {
         assert!(matches!(err, FileError::Escape { .. }));
         // The file must not have been created outside the root.
         assert!(!root.parent().unwrap().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn scan_finds_files_and_skips_keep_and_dirs() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.txt"), b"aaa").unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/b.txt"), b"bb").unwrap();
+        std::fs::create_dir_all(root.join("keep")).unwrap();
+        std::fs::write(root.join("keep/protected.txt"), b"keep me").unwrap();
+        let jail = jail_at(&root);
+        let mut found: Vec<String> = jail
+            .scan()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        found.sort();
+        assert_eq!(found, vec!["a.txt".to_string(), "b.txt".to_string()]);
+    }
+
+    #[test]
+    fn plan_delete_filters_by_age_and_name() {
+        let now = SystemTime::now();
+        let old = now - std::time::Duration::from_secs(10 * 3600);
+        let fresh = now - std::time::Duration::from_secs(60);
+        let entries = vec![
+            DirEntryInfo {
+                path: PathBuf::from("/x/old-report.pdf"),
+                size: 100,
+                modified: old,
+            },
+            DirEntryInfo {
+                path: PathBuf::from("/x/fresh-report.pdf"),
+                size: 200,
+                modified: fresh,
+            },
+            DirEntryInfo {
+                path: PathBuf::from("/x/old-note.txt"),
+                size: 50,
+                modified: old,
+            },
+        ];
+        // Age filter: > 5h selects the two old ones.
+        let by_age = plan_delete(&entries, now, Some(5 * 3600), None);
+        assert_eq!(by_age.len(), 2);
+        // Name filter combines with age (AND): old + contains "report".
+        let both = plan_delete(&entries, now, Some(5 * 3600), Some("REPORT"));
+        assert_eq!(both.len(), 1);
+        assert!(both[0].path.ends_with("old-report.pdf"));
+        // No filters: everything.
+        assert_eq!(plan_delete(&entries, now, None, None).len(), 3);
+    }
+
+    #[test]
+    fn remove_file_refuses_keep_subtree() {
+        let root = tmp_root();
+        std::fs::create_dir_all(root.join("keep")).unwrap();
+        let protected = root.join("keep/x.txt");
+        std::fs::write(&protected, b"x").unwrap();
+        let jail = jail_at(&root);
+        assert!(jail.remove_file(&protected).is_err());
+        assert!(protected.exists(), "keep/ file must survive");
+        // A normal file deletes fine.
+        let normal = root.join("y.txt");
+        std::fs::write(&normal, b"yy").unwrap();
+        assert_eq!(jail.remove_file(&normal).unwrap(), 2);
+        assert!(!normal.exists());
     }
 
     #[test]
