@@ -1,10 +1,10 @@
 {
   "manifest_version": "0.3",
   "name": "google-workspace-mcp",
-  "display_name": "Google Workspace (Sheets + Drive)",
+  "display_name": "Google Workspace",
   "version": "0.7.0",
-  "description": "Local Google Workspace MCP server (Sheets + Drive) that runs privately on your machine over stdio. No SSL certificate and no internet tunnel required.",
-  "long_description": "A self-contained MCP server for Google Sheets and Drive. Runs as a local process launched by Claude Desktop over stdio, so it needs no HTTPS/SSL and is never exposed to the network. Sign in once with your Google account; the encrypted refresh token is stored only on your machine.",
+  "description": "Local Google Workspace MCP server (Gmail, Sheets, Drive, Docs, Calendar) that runs privately on your machine over stdio. No SSL certificate and no internet tunnel required.",
+  "long_description": "A self-contained MCP server for Gmail, Google Sheets, Drive, Docs, and Calendar. Runs as a local process launched by Claude Desktop over stdio, so it needs no HTTPS/SSL and is never exposed to the network. Sign in once with your Google account; the encrypted refresh token is stored only on your machine.",
   "author": {
     "name": "Mat (matpb)",
     "url": "https://github.com/matpb/google-mcp-rs"
@@ -26,7 +26,6 @@
         "GOOGLE_CLIENT_ID": "${user_config.google_client_id}",
         "GOOGLE_CLIENT_SECRET": "${user_config.google_client_secret}",
         "BASE_URL": "http://localhost:8433",
-        "ENABLED_DOMAINS": "sheets,drive",
         "DATABASE_URL": "${HOME}/.google-mcp.db"
       },
       "platform_overrides": {

@@ -14,7 +14,7 @@ use crate::mcp::server::GoogleMcp;
 impl GoogleMcp {
     #[tool(
         name = "google_authenticate",
-        description = "Connect your Google account to this server. Opens a browser window for Google sign-in; approve access to Sheets and Drive, then return here. You only need to do this once — the connection is remembered."
+        description = "Connect your Google account to this server. Opens a browser window for Google sign-in; approve the requested Google Workspace access, then return here. You only need to do this once — the connection is remembered."
     )]
     async fn google_authenticate(&self) -> Result<CallToolResult, ErrorData> {
         let scopes = crate::domain::google_scopes(&self.state.config.enabled_domains);
@@ -30,7 +30,7 @@ impl GoogleMcp {
         {
             Ok(outcome) => Ok(CallToolResult::success(vec![rmcp::model::Content::text(
                 format!(
-                    "Connected Google account: {}. The Sheets and Drive tools are ready to use.",
+                    "Connected Google account: {}. Your Google Workspace tools are ready to use.",
                     outcome.email
                 ),
             )])),
