@@ -55,6 +55,6 @@
   },
   "compatibility": {
     "claude_desktop": ">=0.10.0",
-    "platforms": ["win32", "linux"]
+    "platforms": ["darwin", "win32", "linux"]
   }
 }
