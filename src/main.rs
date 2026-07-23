@@ -5,6 +5,7 @@ mod domain;
 mod errors;
 mod files;
 mod google;
+mod local_auth;
 mod mcp;
 mod mime;
 mod oauth;
@@ -33,46 +34,155 @@ use google::session::SessionCache;
 use mcp::server::GoogleMcp;
 use oauth::google::GoogleOAuthClient;
 use oauth::proxy;
-use state::AppState;
-use storage::{Db, codes::sweep_expired};
+use state::{AppState, Tenancy};
+use storage::{Db, accounts, codes::sweep_expired};
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("google_mcp=info,rmcp=warn,reqwest=warn")),
-        )
-        .init();
+    // Subcommand selects the transport / identity model:
+    //   (default) http  — multi-tenant HTTP server (unchanged, OAuth 2.1)
+    //   stdio           — single-tenant MCP over stdin/stdout for Claude Desktop
+    //   auth            — one-time browser sign-in that stores the local account
+    match std::env::args().nth(1).as_deref() {
+        None | Some("http") => run_http().await,
+        Some("stdio") => run_stdio().await,
+        Some("auth") => run_auth().await,
+        Some(other) => {
+            eprintln!("unknown subcommand `{other}`. usage: google-mcp [http|stdio|auth]");
+            std::process::exit(2);
+        }
+    }
+}
 
-    let cfg = match ServerConfig::from_env() {
+/// Initialize tracing. In stdio mode logs MUST go to stderr — stdout is the
+/// MCP JSON-RPC channel and any stray byte there corrupts the protocol.
+fn init_tracing(to_stderr: bool) {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("google_mcp=info,rmcp=warn,reqwest=warn"));
+    if to_stderr {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
+}
+
+fn load_config() -> ServerConfig {
+    match ServerConfig::from_env() {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("configuration error: {e}");
             std::process::exit(2);
         }
-    };
-    tracing::info!(?cfg, "starting google-mcp");
+    }
+}
 
-    let db = match Db::open(&cfg.database_url).await {
+async fn open_database(cfg: &ServerConfig) -> Db {
+    match Db::open(&cfg.database_url).await {
         Ok(d) => d,
         Err(e) => {
             eprintln!("could not open database at {}: {e}", cfg.database_url);
             std::process::exit(2);
         }
-    };
-    tracing::info!("database opened at {}", cfg.database_url);
+    }
+}
 
-    let http = Arc::new(google_http::build());
+/// Local (stdio) mode auto-provisions the two crypto secrets so the `.mcpb`
+/// bundle carries none. When `JWT_SECRET` / `STORAGE_ENCRYPTION_KEY` are absent
+/// from the environment, generate them once and persist beside the database
+/// (`<DATABASE_URL>.keys`, mode 0600), then inject into the process env before
+/// config is read. Existing/env-supplied values are always respected.
+fn ensure_local_secrets() {
+    use std::io::Write;
 
-    let google_oauth = Arc::new(GoogleOAuthClient::new(
+    let need_jwt = std::env::var("JWT_SECRET")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .is_none();
+    let need_key = std::env::var("STORAGE_ENCRYPTION_KEY")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .is_none();
+    if !need_jwt && !need_key {
+        return;
+    }
+
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "./google-mcp.db".to_string());
+    let keyfile = format!("{db_url}.keys");
+
+    let (mut jwt, mut key) = (None, None);
+    if let Ok(content) = std::fs::read_to_string(&keyfile) {
+        for line in content.lines() {
+            if let Some(v) = line.strip_prefix("JWT_SECRET=") {
+                jwt = Some(v.to_string());
+            } else if let Some(v) = line.strip_prefix("STORAGE_ENCRYPTION_KEY=") {
+                key = Some(v.to_string());
+            }
+        }
+    }
+
+    use rand::RngCore;
+    let mut rng = rand::rngs::OsRng;
+    let jwt = jwt.unwrap_or_else(|| {
+        let mut b = [0u8; 64];
+        rng.fill_bytes(&mut b);
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    });
+    let key = key.unwrap_or_else(|| {
+        use base64::Engine;
+        let mut b = [0u8; 32];
+        rng.fill_bytes(&mut b);
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    });
+
+    if let Ok(mut f) = std::fs::File::create(&keyfile) {
+        let _ = writeln!(f, "JWT_SECRET={jwt}");
+        let _ = writeln!(f, "STORAGE_ENCRYPTION_KEY={key}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&keyfile, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+
+    // SAFETY: called at process startup before any task reads the environment.
+    unsafe {
+        if need_jwt {
+            std::env::set_var("JWT_SECRET", &jwt);
+        }
+        if need_key {
+            std::env::set_var("STORAGE_ENCRYPTION_KEY", &key);
+        }
+    }
+}
+
+fn build_oauth_client(cfg: &ServerConfig, http: &Arc<reqwest::Client>) -> GoogleOAuthClient {
+    GoogleOAuthClient::new(
         cfg.google_client_id.clone(),
         cfg.google_client_secret.clone(),
         cfg.google_redirect_uri(),
         domain::google_scopes(&cfg.enabled_domains),
-        (*http).clone(),
-    ));
+        (**http).clone(),
+    )
+}
 
+// ---------------------------------------------------------------------------
+// HTTP mode (default) — unchanged multi-tenant server.
+// ---------------------------------------------------------------------------
+
+async fn run_http() {
+    init_tracing(false);
+
+    let cfg = load_config();
+    tracing::info!(?cfg, "starting google-mcp (http)");
+
+    let db = open_database(&cfg).await;
+    tracing::info!("database opened at {}", cfg.database_url);
+
+    let http = Arc::new(google_http::build());
+    let google_oauth = Arc::new(build_oauth_client(&cfg, &http));
     let session_cache = SessionCache::new(
         db.clone(),
         Arc::clone(&google_oauth),
@@ -85,6 +195,7 @@ async fn main() {
         http: Arc::clone(&http),
         google_oauth,
         session_cache,
+        tenancy: Tenancy::MultiTenant,
     };
 
     spawn_oauth_state_sweeper(db.clone());
@@ -107,6 +218,94 @@ async fn main() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// stdio mode — single-tenant MCP over stdin/stdout (Claude Desktop / .mcpb).
+// ---------------------------------------------------------------------------
+
+async fn run_stdio() {
+    init_tracing(true); // stderr only — stdout is the MCP channel
+
+    ensure_local_secrets();
+    let cfg = load_config();
+    let db = open_database(&cfg).await;
+    let http = Arc::new(google_http::build());
+    let google_oauth = Arc::new(build_oauth_client(&cfg, &http));
+    let session_cache = SessionCache::new(
+        db.clone(),
+        Arc::clone(&google_oauth),
+        cfg.storage_encryption_key,
+    );
+
+    let sub = accounts::first_google_sub(&db).await.unwrap_or(None);
+    match &sub {
+        Some(s) => tracing::info!("single-tenant stdio bound to account sub={s}"),
+        None => tracing::warn!("no Google account connected yet — run `google-mcp auth` once"),
+    }
+    let tenancy = Tenancy::Single(sub.map(|s| Arc::from(s.as_str())));
+
+    let state = AppState {
+        config: Arc::new(cfg),
+        db,
+        http,
+        google_oauth,
+        session_cache,
+        tenancy,
+    };
+    let mcp = GoogleMcp::new(state);
+
+    tracing::info!("serving google-mcp over stdio");
+    let transport = (tokio::io::stdin(), tokio::io::stdout());
+    let running = match rmcp::serve_server(mcp, transport).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("stdio serve init failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = running.waiting().await {
+        eprintln!("stdio session ended with error: {e}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// auth mode — one-time browser loopback sign-in, stores the local account.
+// ---------------------------------------------------------------------------
+
+async fn run_auth() {
+    init_tracing(true);
+
+    ensure_local_secrets();
+    let cfg = load_config();
+    let db = open_database(&cfg).await;
+    let http = Arc::new(google_http::build());
+    let google_oauth = build_oauth_client(&cfg, &http);
+    let scopes = domain::google_scopes(&cfg.enabled_domains);
+
+    match local_auth::run_loopback(
+        &google_oauth,
+        &cfg.base_url,
+        &db,
+        &cfg.storage_encryption_key,
+        scopes,
+        true,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            println!("Connected Google account: {}", outcome.email);
+            eprintln!("Saved. The server is ready — Claude Desktop will use it over stdio.");
+        }
+        Err(e) => {
+            eprintln!("sign-in failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared HTTP wiring (used by run_http).
+// ---------------------------------------------------------------------------
 
 fn build_router(state: AppState) -> Router {
     let cors = build_cors(&state.config);
