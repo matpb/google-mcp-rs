@@ -9,11 +9,11 @@ use rmcp::{ErrorData, ServerHandler, tool_handler};
 
 use crate::credentials::resolve_google;
 use crate::domain::Domain;
-use crate::errors::to_mcp;
+use crate::errors::{McpError, to_mcp};
 use crate::files::FileJail;
 use crate::google::gmail::GmailClient;
 use crate::google::session::GoogleAccountSession;
-use crate::state::AppState;
+use crate::state::{AppState, Tenancy};
 
 #[derive(Clone)]
 pub struct GoogleMcp {
@@ -48,6 +48,11 @@ impl GoogleMcp {
                 tool_router += Self::files_cleanup_router();
             }
         }
+        // Single-tenant (stdio) mode exposes an in-chat sign-in tool, since
+        // there is no HTTP OAuth flow to authorize the local account.
+        if matches!(state.tenancy, Tenancy::Single(_)) {
+            tool_router += Self::auth_router();
+        }
         Self { state, tool_router }
     }
 
@@ -65,14 +70,34 @@ impl GoogleMcp {
         &self,
         parts: &Parts,
     ) -> Result<GoogleAccountSession, ErrorData> {
-        resolve_google(
-            parts,
-            &self.state.config.jwt_secret,
-            &self.state.config.base_url,
-            &self.state.session_cache,
-        )
-        .await
-        .map_err(to_mcp)
+        match &self.state.tenancy {
+            // stdio: identity is the one bound local account; no bearer needed.
+            Tenancy::Single(Some(sub)) => {
+                self.state.session_cache.resolve(sub).await.map_err(to_mcp)
+            }
+            Tenancy::Single(None) => {
+                // No account was connected at startup, but the in-chat
+                // `google_authenticate` tool may have connected one since.
+                // Re-check the store before giving up.
+                match crate::storage::accounts::first_google_sub(&self.state.db).await {
+                    Ok(Some(sub)) => self.state.session_cache.resolve(&sub).await.map_err(to_mcp),
+                    _ => Err(McpError::invalid_input(
+                        "No Google account is connected yet. Use the \
+                         `google_authenticate` tool to sign in with your Google account.",
+                    )
+                    .into()),
+                }
+            }
+            // HTTP: identity from the per-request bearer JWT.
+            Tenancy::MultiTenant => resolve_google(
+                parts,
+                &self.state.config.jwt_secret,
+                &self.state.config.base_url,
+                &self.state.session_cache,
+            )
+            .await
+            .map_err(to_mcp),
+        }
     }
 
     pub(crate) async fn gmail_for(&self, parts: &Parts) -> Result<GmailClient, ErrorData> {
@@ -93,7 +118,7 @@ mod harness {
 
     use std::sync::Arc;
 
-    use super::{AppState, GoogleMcp};
+    use super::{AppState, GoogleMcp, Tenancy};
     use crate::config::ServerConfig;
     use crate::domain::{self, Domain};
     use crate::google::session::SessionCache;
@@ -131,6 +156,7 @@ mod harness {
             http,
             google_oauth,
             session_cache,
+            tenancy: Tenancy::MultiTenant,
         };
         GoogleMcp::new(state)
     }
@@ -403,5 +429,27 @@ impl ServerHandler for GoogleMcp {
             file_handling_instructions(self.state.config.file_jail.as_ref())
         ));
         info
+    }
+
+    // Hand-written so single-tenant (stdio) sessions carry a request `Parts`.
+    // Over HTTP the transport injects the real `Parts` (with the bearer);
+    // over stdio nothing does, yet every tool handler extracts
+    // `Extension<Parts>` and errors if it is absent. Identity in single-tenant
+    // mode comes from `Tenancy::Single`, so an empty placeholder `Parts` is
+    // enough to satisfy the extractor. `#[tool_handler]` still generates
+    // `list_tools`/`get_tool`/`get_info` because those are not defined here.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        mut context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        if matches!(self.state.tenancy, Tenancy::Single(_))
+            && context.extensions.get::<Parts>().is_none()
+        {
+            let (parts, _) = http::Request::new(()).into_parts();
+            context.extensions.insert(parts);
+        }
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
     }
 }

@@ -1,5 +1,6 @@
 //! MCP server: tool registration and request handling.
 
+pub mod auth_tools;
 pub mod calendar_tools;
 pub mod docs_tools;
 pub mod drive_tools;

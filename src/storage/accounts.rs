@@ -146,6 +146,23 @@ pub async fn delete(db: &Db, google_sub: &str) -> Result<(), DbError> {
     .await
 }
 
+/// Return the `google_sub` of the earliest-connected account, or `None` if the
+/// store is empty. Single-tenant (stdio) mode uses this to bind the process to
+/// the one local account without a bearer JWT.
+pub async fn first_google_sub(db: &Db) -> Result<Option<String>, DbError> {
+    db.call(move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT google_sub FROM oauth_accounts ORDER BY created_at, google_sub LIMIT 1",
+        )?;
+        match stmt.query_row([], |r| r.get::<_, String>(0)) {
+            Ok(s) => Ok(Some(s)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

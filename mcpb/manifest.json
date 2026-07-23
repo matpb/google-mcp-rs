@@ -1,0 +1,58 @@
+{
+  "manifest_version": "0.3",
+  "name": "google-workspace-mcp",
+  "display_name": "Google Workspace (Sheets + Drive)",
+  "version": "0.7.0",
+  "description": "Local Google Workspace MCP server (Sheets + Drive) that runs privately on your machine over stdio. No SSL certificate and no internet tunnel required.",
+  "long_description": "A self-contained MCP server for Google Sheets and Drive. Runs as a local process launched by Claude Desktop over stdio, so it needs no HTTPS/SSL and is never exposed to the network. Sign in once with your Google account; the encrypted refresh token is stored only on your machine.",
+  "author": {
+    "name": "Mat (matpb)",
+    "url": "https://github.com/matpb/google-mcp-rs"
+  },
+  "homepage": "https://github.com/matpb/google-mcp-rs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matpb/google-mcp-rs"
+  },
+  "license": "MIT",
+  "keywords": ["google", "sheets", "drive", "workspace", "mcp", "gmail"],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/google-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/server/google-mcp",
+      "args": ["stdio"],
+      "env": {
+        "GOOGLE_CLIENT_ID": "${user_config.google_client_id}",
+        "GOOGLE_CLIENT_SECRET": "${user_config.google_client_secret}",
+        "BASE_URL": "http://localhost:8433",
+        "ENABLED_DOMAINS": "sheets,drive",
+        "DATABASE_URL": "${HOME}/.google-mcp.db"
+      },
+      "platform_overrides": {
+        "win32": {
+          "command": "${__dirname}/server/google-mcp.exe"
+        }
+      }
+    }
+  },
+  "user_config": {
+    "google_client_id": {
+      "type": "string",
+      "title": "Google Client ID",
+      "description": "OAuth client ID (Web application type) from your Google Cloud project.",
+      "required": true
+    },
+    "google_client_secret": {
+      "type": "string",
+      "title": "Google Client Secret",
+      "description": "OAuth client secret paired with the client ID above.",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["win32", "linux"]
+  }
+}
