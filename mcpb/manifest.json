@@ -31,6 +31,9 @@
       "platform_overrides": {
         "win32": {
           "command": "${__dirname}/server/google-mcp.exe"
+        },
+        "darwin": {
+          "command": "${__dirname}/server/google-mcp-darwin"
         }
       }
     }
