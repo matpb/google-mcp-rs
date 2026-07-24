@@ -9,6 +9,7 @@ use rmcp::{ErrorData, tool, tool_router};
 
 use crate::errors::McpError;
 use crate::mcp::server::GoogleMcp;
+use crate::state::Tenancy;
 
 #[tool_router(router = auth_router, vis = "pub(crate)")]
 impl GoogleMcp {
@@ -17,6 +18,18 @@ impl GoogleMcp {
         description = "Connect your Google account to this server. Opens a browser window for Google sign-in; approve the requested Google Workspace access, then return here. You only need to do this once — the connection is remembered."
     )]
     async fn google_authenticate(&self) -> Result<CallToolResult, ErrorData> {
+        // Defence in depth. This tool binds a loopback listener and opens a
+        // browser on the host, so it must never be reachable from the
+        // multi-tenant HTTP surface even if the router composition in
+        // `GoogleMcp::new` ever regressed and registered it there.
+        if !matches!(self.state.tenancy, Tenancy::Single(_)) {
+            return Err(McpError::invalid_input(
+                "google_authenticate is only available in single-tenant (stdio) mode. \
+                 HTTP clients authenticate through the OAuth flow at /authorize.",
+            )
+            .into());
+        }
+
         let scopes = crate::domain::google_scopes(&self.state.config.enabled_domains);
         match crate::local_auth::run_loopback(
             self.state.google_oauth.as_ref(),
