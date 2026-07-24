@@ -161,6 +161,15 @@ mod harness {
         GoogleMcp::new(state)
     }
 
+    /// Same as `make_mcp`, but in single-tenant (stdio) mode with no account
+    /// connected yet — the shape a Claude Desktop bundle starts in.
+    pub(crate) async fn make_mcp_single(enabled_domains: Vec<Domain>) -> GoogleMcp {
+        let mcp = make_mcp(enabled_domains).await;
+        let mut state = mcp.state.clone();
+        state.tenancy = Tenancy::Single(None);
+        GoogleMcp::new(state)
+    }
+
     pub(crate) async fn make_mcp_with_jail(
         enabled_domains: Vec<Domain>,
         maintenance: crate::files::FileMaintenance,
@@ -326,6 +335,35 @@ mod tests {
         names_a.sort();
         names_b.sort();
         assert_eq!(names_a, names_b);
+    }
+
+    /// `google_authenticate` binds a loopback listener and opens a browser on
+    /// the host. It must exist only in single-tenant (stdio) mode and must
+    /// never leak onto the multi-tenant HTTP surface.
+    #[tokio::test]
+    async fn authenticate_tool_is_single_tenant_only() {
+        let multi = make_mcp(Domain::ALL.to_vec()).await;
+        assert!(
+            !tool_names(&multi).contains(&"google_authenticate".to_string()),
+            "google_authenticate must not be exposed on the HTTP (multi-tenant) surface"
+        );
+
+        let single = make_mcp_single(Domain::ALL.to_vec()).await;
+        assert!(
+            tool_names(&single).contains(&"google_authenticate".to_string()),
+            "google_authenticate must be exposed in single-tenant (stdio) mode"
+        );
+    }
+
+    /// Single-tenant mode adds exactly one tool (the sign-in tool) and changes
+    /// nothing else about the surface.
+    #[tokio::test]
+    async fn single_tenant_adds_only_the_auth_tool() {
+        let multi = tool_names(&make_mcp(Domain::ALL.to_vec()).await);
+        let single = tool_names(&make_mcp_single(Domain::ALL.to_vec()).await);
+        assert_eq!(single.len(), multi.len() + 1);
+        let extra: Vec<_> = single.iter().filter(|t| !multi.contains(t)).collect();
+        assert_eq!(extra, vec![&"google_authenticate".to_string()]);
     }
 
     #[tokio::test]
