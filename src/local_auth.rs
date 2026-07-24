@@ -5,6 +5,7 @@
 //! port, opens the user's browser to Google's consent screen, captures the
 //! callback, exchanges the code, and stores the encrypted account locally.
 
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,10 +17,18 @@ use tokio::net::TcpListener;
 use crate::oauth::google::{GoogleOAuthClient, parse_id_token};
 use crate::storage::{Db, accounts};
 
+/// How long to wait for the user to finish the Google consent screen before
+/// giving up and releasing the callback port.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// Served for requests that are not the callback we are waiting for.
+const PAGE_IGNORED: &str = "<!doctype html><html><body style=\"font-family:sans-serif;max-width:540px;margin:4rem auto;padding:0 1rem\">\
+     <h1>Nothing to do here</h1>\
+     <p>This page only handles a Google sign-in redirect. You can close this tab.</p></body></html>";
+
 /// The connected account, returned on success.
 pub struct AuthOutcome {
     pub email: String,
-    #[allow(dead_code)]
     pub google_sub: String,
 }
 
@@ -51,6 +60,17 @@ pub async fn run_loopback(
     let uri: http::Uri = base_url
         .parse()
         .map_err(|e| format!("invalid BASE_URL `{base_url}`: {e}"))?;
+
+    // The callback is captured by a listener on THIS machine, so a non-loopback
+    // BASE_URL would send the browser somewhere else and hang forever.
+    let host = uri.host().unwrap_or_default();
+    if !matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        return Err(format!(
+            "BASE_URL host `{host}` is not a loopback address. The in-chat sign-in \
+             captures Google's redirect on this machine, so BASE_URL must point at \
+             localhost (for example http://localhost:8433)."
+        ));
+    }
     let port = uri
         .port_u16()
         .unwrap_or(if uri.scheme_str() == Some("https") {
@@ -83,15 +103,26 @@ pub async fn run_loopback(
     }
     eprintln!("Sign in with Google at:\n{auth_url}\n");
 
-    let code = match rx.await {
-        Ok(Ok(code)) => code,
-        Ok(Err(e)) => {
+    // Bounded wait. Without a timeout an abandoned sign-in (user closes the tab)
+    // would keep this task and the listener alive for the life of the process,
+    // holding the callback port and making every later sign-in fail to bind.
+    let code = match tokio::time::timeout(SIGN_IN_TIMEOUT, rx).await {
+        Ok(Ok(Ok(code))) => code,
+        Ok(Ok(Err(e))) => {
             server.abort();
             return Err(e);
         }
-        Err(_) => {
+        Ok(Err(_)) => {
             server.abort();
             return Err("sign-in cancelled (callback channel closed)".to_string());
+        }
+        Err(_) => {
+            server.abort();
+            return Err(format!(
+                "sign-in timed out after {} minutes. The callback port has been released — \
+                 run the sign-in again when you are ready.",
+                SIGN_IN_TIMEOUT.as_secs() / 60
+            ));
         }
     };
     // Let the browser render the success page before we drop the listener.
@@ -142,20 +173,31 @@ async fn callback(
     State(shared): State<Arc<Shared>>,
     Query(q): Query<CallbackQuery>,
 ) -> Html<&'static str> {
-    let result = if let Some(err) = q.error {
-        Err(format!("Google returned error: {err}"))
-    } else if q.state.as_deref() != Some(shared.expected_state.as_str()) {
-        Err("state mismatch (possible CSRF)".to_string())
-    } else if let Some(code) = q.code {
-        Ok(code)
-    } else {
-        Err("callback missing authorization code".to_string())
-    };
-    let ok = result.is_ok();
-    if let Some(tx) = shared.tx.lock().unwrap().take() {
-        let _ = tx.send(result);
+    // The listener is reachable by any local process and by any page the user
+    // happens to be visiting (a plain cross-origin GET needs no preflight). Only
+    // a request carrying our single-use `state` may resolve the flow; anything
+    // else is ignored so it cannot cancel a sign-in that is still in progress.
+    if q.state.as_deref() != Some(shared.expected_state.as_str()) {
+        return Html(PAGE_IGNORED);
     }
-    if ok {
+    let result = match (q.code, q.error) {
+        (Some(code), _) => Ok(code),
+        (None, Some(err)) => Err(format!("Google returned error: {err}")),
+        (None, None) => return Html(PAGE_IGNORED),
+    };
+
+    // Report success only if this response is the one that actually resolved the
+    // flow; a late duplicate must not claim the account was connected.
+    let delivered = match shared.tx.lock().expect("callback sender lock").take() {
+        Some(tx) => {
+            let ok = result.is_ok();
+            let _ = tx.send(result);
+            ok
+        }
+        None => false,
+    };
+
+    if delivered {
         Html(
             "<!doctype html><html><body style=\"font-family:sans-serif;max-width:540px;margin:4rem auto;padding:0 1rem\">\
              <h1 style=\"color:#2a6\">Connected to Google</h1>\
@@ -172,11 +214,37 @@ async fn callback(
 
 fn open_browser(url: &str) {
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", url])
-        .spawn();
+    // `cmd /c start` would shell-interpret `&` and truncate the query string, so
+    // hand the URL to the protocol handler directly.
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", url]);
+        c
+    };
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
     #[cfg(all(unix, not(target_os = "macos")))]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+
+    // Never let the helper (or the browser it execs) inherit our stdin/stdout:
+    // in stdio mode those descriptors ARE the MCP JSON-RPC channel, and a single
+    // stray byte written there corrupts the protocol framing.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    // Reap the child so repeated sign-ins do not accumulate zombies.
+    if let Ok(mut child) = cmd.spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }

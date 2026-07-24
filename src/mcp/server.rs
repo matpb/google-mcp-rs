@@ -2,6 +2,8 @@
 //! provides per-request credential resolution, and bridges domain errors
 //! into `rmcp::ErrorData`.
 
+use std::sync::Arc;
+
 use http::request::Parts;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::model::{ServerCapabilities, ServerInfo};
@@ -72,19 +74,31 @@ impl GoogleMcp {
     ) -> Result<GoogleAccountSession, ErrorData> {
         match &self.state.tenancy {
             // stdio: identity is the one bound local account; no bearer needed.
-            Tenancy::Single(Some(sub)) => {
-                self.state.session_cache.resolve(sub).await.map_err(to_mcp)
-            }
-            Tenancy::Single(None) => {
-                // No account was connected at startup, but the in-chat
-                // `google_authenticate` tool may have connected one since.
-                // Re-check the store before giving up.
-                match crate::storage::accounts::first_google_sub(&self.state.db).await {
-                    Ok(Some(sub)) => self.state.session_cache.resolve(&sub).await.map_err(to_mcp),
-                    _ => Err(McpError::invalid_input(
+            Tenancy::Single(bound) => {
+                // Read and release before any await — never hold the guard
+                // across a suspension point.
+                let current = bound.read().expect("bound account lock").clone();
+                if let Some(sub) = current {
+                    return self.state.session_cache.resolve(&sub).await.map_err(to_mcp);
+                }
+                // Nothing bound yet. An account may have been connected since
+                // startup (the `auth` subcommand writes to the same store), so
+                // re-check before giving up. Storage failures are surfaced as
+                // such rather than masked as "no account", which would tell the
+                // user to sign in when signing in cannot help.
+                match crate::storage::accounts::latest_google_sub(&self.state.db).await {
+                    Ok(Some(sub)) => {
+                        *bound.write().expect("bound account lock") = Some(Arc::from(sub.as_str()));
+                        self.state.session_cache.resolve(&sub).await.map_err(to_mcp)
+                    }
+                    Ok(None) => Err(McpError::invalid_input(
                         "No Google account is connected yet. Use the \
                          `google_authenticate` tool to sign in with your Google account.",
                     )
+                    .into()),
+                    Err(e) => Err(McpError::internal(format!(
+                        "could not read the local account store: {e}"
+                    ))
                     .into()),
                 }
             }
@@ -166,7 +180,7 @@ mod harness {
     pub(crate) async fn make_mcp_single(enabled_domains: Vec<Domain>) -> GoogleMcp {
         let mcp = make_mcp(enabled_domains).await;
         let mut state = mcp.state.clone();
-        state.tenancy = Tenancy::Single(None);
+        state.tenancy = Tenancy::Single(Arc::new(std::sync::RwLock::new(None)));
         GoogleMcp::new(state)
     }
 

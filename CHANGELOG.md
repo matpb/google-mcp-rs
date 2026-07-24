@@ -14,8 +14,8 @@ extension**, without changing anything about the existing HTTP server.
 
 - **stdio transport (`google-mcp stdio`)** — serves the full tool surface over
   stdin/stdout for a single local Google account. Claude Desktop launches the
-  binary as a child process, so there is no TLS certificate, no tunnel, and
-  nothing listening on the network.
+  binary as a child process, so there is no TLS certificate, no tunnel, and no
+  inbound network exposure.
 - **Claude Desktop bundle (`.mcpb`)** — prebuilt, one-click installable MCP
   Bundle carrying native binaries for macOS, Windows, and Linux. See
   [`mcpb/`](mcpb/). Published on the [Releases](https://github.com/matpb/google-mcp-rs/releases)
@@ -40,8 +40,32 @@ extension**, without changing anything about the existing HTTP server.
 - README documents both transports; the previous "streamable HTTP only, no
   stdio" statement is no longer accurate.
 
+### Security
+
+The single-tenant path was reviewed before release; the following are how it
+behaves, not a list of shipped bugs:
+
+- The local keyfile is created at mode `0600` with `create_new` and installed by
+  atomic rename, so secrets are never briefly world-readable, a pre-planted
+  symlink cannot redirect the write, and an interrupted run cannot leave a
+  truncated keyfile (losing `STORAGE_ENCRYPTION_KEY` would make every stored
+  token permanently undecryptable).
+- Auto-provisioning runs **after** `.env` is loaded, so a `.env`-supplied secret
+  is never shadowed by a freshly generated one.
+- The sign-in callback listener only acts on a request carrying the single-use
+  `state`, so another local process — or any page the user happens to be
+  visiting — cannot cancel or hijack an in-flight sign-in. It also times out
+  after 5 minutes and releases the port.
+- `google_authenticate` refuses to run outside single-tenant mode, and is not
+  registered on the multi-tenant HTTP surface at all (pinned by tests).
+- Re-running the sign-in rebinds the process to the account that just
+  authorized, instead of silently continuing to act as the previous one.
+
 ### Notes
 
+- On a multi-user machine, the sign-in URL is passed to the browser via the
+  process command line, which is world-readable on Linux. The bundle targets
+  single-user desktops; do not run the sign-in on a shared host.
 - Release binaries are **not yet code-signed or notarized**. macOS may require
   clearing the download quarantine once, and Windows SmartScreen may warn. See
   the README for the one-liner.

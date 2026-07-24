@@ -146,13 +146,19 @@ pub async fn delete(db: &Db, google_sub: &str) -> Result<(), DbError> {
     .await
 }
 
-/// Return the `google_sub` of the earliest-connected account, or `None` if the
-/// store is empty. Single-tenant (stdio) mode uses this to bind the process to
-/// the one local account without a bearer JWT.
-pub async fn first_google_sub(db: &Db) -> Result<Option<String>, DbError> {
+/// Return the `google_sub` of the most recently connected account, or `None` if
+/// the store is empty. Single-tenant (stdio) mode uses this to bind the process
+/// to the local account without a bearer JWT.
+///
+/// Ordered by `updated_at` **descending** so that re-running the sign-in flow
+/// rebinds to the account the user just authorized. `upsert` refreshes
+/// `updated_at` but never `created_at`, so ordering by creation time would
+/// pin the process to the first account ever connected and make every later
+/// sign-in silently ineffective.
+pub async fn latest_google_sub(db: &Db) -> Result<Option<String>, DbError> {
     db.call(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT google_sub FROM oauth_accounts ORDER BY created_at, google_sub LIMIT 1",
+            "SELECT google_sub FROM oauth_accounts ORDER BY updated_at DESC, google_sub LIMIT 1",
         )?;
         match stmt.query_row([], |r| r.get::<_, String>(0)) {
             Ok(s) => Ok(Some(s)),
@@ -323,6 +329,65 @@ mod tests {
                 .unwrap()
                 .last_refresh_at
                 .is_some()
+        );
+    }
+
+    /// Single-tenant mode binds to whichever account signed in most recently.
+    /// Ordering by creation time instead would pin the process to the first
+    /// account ever connected, so a later sign-in would appear to succeed while
+    /// every tool kept using the old account.
+    #[tokio::test]
+    async fn latest_google_sub_follows_the_most_recent_signin() {
+        let db = Db::open_in_memory().await.unwrap();
+        assert!(latest_google_sub(&db).await.unwrap().is_none());
+
+        for sub in ["sub-old", "sub-new"] {
+            upsert(
+                &db,
+                &key(),
+                UpsertAccount {
+                    google_sub: sub.to_string(),
+                    email: format!("{sub}@x.com"),
+                    refresh_token: "t".to_string(),
+                    scopes: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // Pin timestamps explicitly: `now_secs()` has one-second granularity, so
+        // two upserts in the same test would otherwise tie.
+        db.call(|conn| {
+            conn.execute(
+                "UPDATE oauth_accounts SET updated_at = 100 WHERE google_sub = 'sub-old'",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE oauth_accounts SET updated_at = 200 WHERE google_sub = 'sub-new'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            latest_google_sub(&db).await.unwrap().as_deref(),
+            Some("sub-new")
+        );
+
+        // Signing back in as the older account must rebind to it.
+        db.call(|conn| {
+            conn.execute(
+                "UPDATE oauth_accounts SET updated_at = 300 WHERE google_sub = 'sub-old'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            latest_google_sub(&db).await.unwrap().as_deref(),
+            Some("sub-old")
         );
     }
 
