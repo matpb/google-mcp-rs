@@ -9,10 +9,10 @@ which only accepts `https://` endpoints.
 ## Why this exists
 
 The HTTP server (`google-mcp` default mode) is multi-tenant and OAuth-2.1. For a
-single non-technical user on their own machine (e.g. Joel on Windows), Claude
-Desktop's connector UI rejects a plain `http://localhost` server for lack of TLS,
-and we don't want to expose the server publicly. A `.mcpb` runs the binary
-locally over stdio instead — single-tenant, private, no certificate.
+single user on their own machine, Claude Desktop's custom-connector UI rejects a
+plain `http://localhost` server for lack of TLS, and exposing the server publicly
+just to satisfy that is a bad trade. A `.mcpb` runs the binary locally over stdio
+instead — single-tenant, private, no certificate.
 
 ## How it works
 
