@@ -2,7 +2,9 @@
 
 A multi-tenant **Model Context Protocol** server for **Google Workspace**, written in Rust. Built around streamable HTTP transport with full **OAuth 2.1** so it plugs straight into Claude.ai, Claude Code, ChatGPT custom connectors, Cursor, or any MCP client that speaks the 2025-11-25 authorization spec.
 
-> **Status:** v0.7.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) live. **76 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`.
+It also runs in **single-tenant stdio mode**, packaged as a one-click **Claude Desktop extension** ([`.mcpb`](#quick-start--claude-desktop-extension-mcpb)) — no TLS certificate, no tunnel, nothing exposed to the network.
+
+> **Status:** v0.8.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) live. **76 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. Claude Desktop bundles add a 77th tool, `google_authenticate`, for in-chat sign-in.
 
 ## Why
 
@@ -11,7 +13,7 @@ The first-party Google Workspace MCP server is missing fundamentals (you cannot 
 - **Full Gmail / Sheets / Drive / Docs / Calendar surface** — 76 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), and Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence).
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256.
-- **Streamable HTTP only** — no stdio. One running instance serves many MCP clients (multiple Claude Code instances, Claude.ai, ChatGPT custom connectors) and many Google accounts simultaneously.
+- **Two transports, one binary** — **streamable HTTP** (multi-tenant: one running instance serves many MCP clients and many Google accounts at once), or **stdio** (single-tenant: Claude Desktop launches it as a local child process, no TLS and nothing on the network). See [Quick start — Claude Desktop](#quick-start--claude-desktop-extension-mcpb).
 - **One binary, distroless image** — small surface, no runtime dependencies.
 
 ## Architecture overview
@@ -58,7 +60,38 @@ Public-internet deployment is *possible* — the OAuth flow, crypto (AES-256-GCM
 
 If those gaps don't fit your threat model, fork it. The architecture is set up to make those additions straightforward, and PRs are welcome.
 
-## Quick start (local development)
+## Quick start — Claude Desktop extension (`.mcpb`)
+
+The fastest way to run this. Claude Desktop launches the binary locally over stdio, so there is **no TLS certificate, no tunnel, and nothing listening on your network**. Works on macOS, Windows, and Linux.
+
+1. **Download** the latest `google-workspace-mcp.mcpb` from [Releases](https://github.com/matpb/google-mcp-rs/releases).
+2. **Create your own Google OAuth client** — follow [step 1 below](#1-create-a-google-oauth-client), and register exactly this redirect URI:
+   ```
+   http://localhost:8433/oauth/google/callback
+   ```
+   (Google rejects the sign-in with `redirect_uri_mismatch` if this is missing.)
+3. **Double-click the `.mcpb`.** Claude Desktop opens an install dialog asking for your **Google Client ID** and **Client Secret** — paste them in and install.
+4. In any chat, ask Claude to run the **`google_authenticate`** tool. A browser opens, you approve access, and that is it. You only do this once.
+
+That is the entire configuration. `JWT_SECRET` and `STORAGE_ENCRYPTION_KEY` are generated automatically on first run and stored beside the database at mode `0600` — **the bundle ships no secrets**. Your encrypted Google refresh token lives only on your machine (`~/.google-mcp.db`).
+
+<details>
+<summary><b>Platform notes (unsigned binaries)</b></summary>
+
+The release binaries are **not code-signed or notarized yet**, so the OS may object the first time:
+
+- **macOS** — if Claude Desktop cannot launch the server, clear the download quarantine once:
+  ```bash
+  xattr -dr com.apple.quarantine ~/Library/Application\ Support/Claude/Claude\ Extensions/
+  ```
+- **Windows** — SmartScreen may warn on first run: **More info → Run anyway**.
+- **Port 8433** must be free while you sign in (it is only used for the OAuth callback). If something else owns it, sign-in fails with a clear message.
+
+</details>
+
+To build the bundle yourself, or to scope the tool surface down, see [`mcpb/README.md`](mcpb/README.md).
+
+## Quick start — HTTP server (local development)
 
 ### 1. Create a Google OAuth client
 

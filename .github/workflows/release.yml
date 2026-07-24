@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --bin google-mcp
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp target/release/google-mcp dist/google-mcp-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/google-mcp-linux-x86_64
+          if-no-files-found: error
+
+  build-macos:
+    # Build a universal binary so one bundle covers Intel and Apple Silicon.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: |
+          cargo build --release --bin google-mcp --target aarch64-apple-darwin
+          cargo build --release --bin google-mcp --target x86_64-apple-darwin
+      - name: Fuse universal binary
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/google-mcp-macos-universal \
+            target/aarch64-apple-darwin/release/google-mcp \
+            target/x86_64-apple-darwin/release/google-mcp
+          lipo -info dist/google-mcp-macos-universal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/google-mcp-macos-universal
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --bin google-mcp
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/google-mcp.exe dist/google-mcp-windows-x86_64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/google-mcp-windows-x86_64.exe
+          if-no-files-found: error
+
+  bundle:
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble bundle
+        run: |
+          mkdir -p mcpb/build/server
+          cp mcpb/manifest.json mcpb/build/manifest.json
+          cp artifacts/linux/google-mcp-linux-x86_64        mcpb/build/server/google-mcp
+          cp artifacts/macos/google-mcp-macos-universal     mcpb/build/server/google-mcp-darwin
+          cp artifacts/windows/google-mcp-windows-x86_64.exe mcpb/build/server/google-mcp.exe
+          chmod +x mcpb/build/server/google-mcp mcpb/build/server/google-mcp-darwin
+      - name: Validate and pack
+        run: |
+          npx -y @anthropic-ai/mcpb validate mcpb/build/manifest.json
+          npx -y @anthropic-ai/mcpb pack mcpb/build google-workspace-mcp.mcpb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: google-workspace-mcp.mcpb
+          if-no-files-found: error
+
+  release:
+    needs: [bundle]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO_VER="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ "$TAG" != "$CARGO_VER" ]; then
+            echo "tag v$TAG does not match Cargo.toml version $CARGO_VER"; exit 1
+          fi
+          echo "version $TAG confirmed"
+      - name: Extract release notes from CHANGELOG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" {f=1; next}
+            f && /^## \[/ {exit}
+            f {print}
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "No CHANGELOG section for $VERSION" > notes.md
+          fi
+          cat notes.md
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            artifacts/bundle/google-workspace-mcp.mcpb \
+            artifacts/linux/google-mcp-linux-x86_64 \
+            artifacts/macos/google-mcp-macos-universal \
+            artifacts/windows/google-mcp-windows-x86_64.exe
