@@ -2,7 +2,7 @@
 
 A multi-tenant **Model Context Protocol** server for **Google Workspace**, written in Rust. Built around streamable HTTP transport with full **OAuth 2.1** so it plugs straight into Claude.ai, Claude Code, ChatGPT custom connectors, Cursor, or any MCP client that speaks the 2025-11-25 authorization spec.
 
-It also runs in **single-tenant stdio mode**, packaged as a one-click **Claude Desktop extension** ([`.mcpb`](#quick-start--claude-desktop-extension-mcpb)) — no TLS certificate, no tunnel, nothing exposed to the network.
+It also runs in **single-tenant stdio mode**, packaged as a one-click **Claude Desktop extension** ([`.mcpb`](#quick-start--claude-desktop-extension-mcpb)) — no TLS certificate, no tunnel, no inbound network exposure.
 
 > **Status:** v0.8.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) live. **76 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. Claude Desktop bundles add a 77th tool, `google_authenticate`, for in-chat sign-in.
 
@@ -62,7 +62,7 @@ If those gaps don't fit your threat model, fork it. The architecture is set up t
 
 ## Quick start — Claude Desktop extension (`.mcpb`)
 
-The fastest way to run this. Claude Desktop launches the binary locally over stdio, so there is **no TLS certificate, no tunnel, and nothing listening on your network**. Works on macOS, Windows, and Linux.
+The fastest way to run this. Claude Desktop launches the binary locally over stdio, so there is **no TLS certificate, no tunnel, and no inbound network exposure**. Works on macOS, Windows, and Linux. (During sign-in only, a short-lived listener on `127.0.0.1:8433` catches Google's redirect; it is closed as soon as the flow finishes or times out.)
 
 1. **Download** the latest `google-workspace-mcp.mcpb` from [Releases](https://github.com/matpb/google-mcp-rs/releases).
 2. **Create your own Google OAuth client** — follow [step 1 below](#1-create-a-google-oauth-client), and register exactly this redirect URI:

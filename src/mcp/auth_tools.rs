@@ -41,12 +41,25 @@ impl GoogleMcp {
         )
         .await
         {
-            Ok(outcome) => Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                format!(
-                    "Connected Google account: {}. Your Google Workspace tools are ready to use.",
-                    outcome.email
-                ),
-            )])),
+            Ok(outcome) => {
+                // Rebind the running process to the account that just signed
+                // in. Without this the server would keep using whichever
+                // account was bound at startup while reporting success for the
+                // new one — the user would silently read and send from the
+                // wrong mailbox.
+                if let Tenancy::Single(bound) = &self.state.tenancy {
+                    *bound.write().expect("bound account lock") =
+                        Some(std::sync::Arc::from(outcome.google_sub.as_str()));
+                }
+                let who = if outcome.email.is_empty() {
+                    "your Google account".to_string()
+                } else {
+                    outcome.email.clone()
+                };
+                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                    format!("Connected {who}. Your Google Workspace tools are ready to use."),
+                )]))
+            }
             Err(e) => Err(McpError::internal(format!("Google sign-in failed: {e}")).into()),
         }
     }

@@ -13,6 +13,7 @@ mod state;
 mod storage;
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -91,71 +92,133 @@ async fn open_database(cfg: &ServerConfig) -> Db {
 
 /// Local (stdio) mode auto-provisions the two crypto secrets so the `.mcpb`
 /// bundle carries none. When `JWT_SECRET` / `STORAGE_ENCRYPTION_KEY` are absent
-/// from the environment, generate them once and persist beside the database
-/// (`<DATABASE_URL>.keys`, mode 0600), then inject into the process env before
-/// config is read. Existing/env-supplied values are always respected.
-fn ensure_local_secrets() {
-    use std::io::Write;
-
-    let need_jwt = std::env::var("JWT_SECRET")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .is_none();
-    let need_key = std::env::var("STORAGE_ENCRYPTION_KEY")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .is_none();
-    if !need_jwt && !need_key {
-        return;
+/// from the environment, they are loaded from `<DATABASE_URL>.keys` — generated
+/// and persisted there on first run — and injected into the process env before
+/// the config is read.
+///
+/// Must be called **after** `dotenvy::dotenv()`. `dotenvy` never overwrites a
+/// variable that is already set, so anything injected here would otherwise win
+/// over a `.env` file and silently swap the key that decrypts an existing
+/// database.
+fn ensure_local_secrets() -> Result<(), String> {
+    let env_jwt = optional_env("JWT_SECRET");
+    let env_key = optional_env("STORAGE_ENCRYPTION_KEY");
+    if env_jwt.is_some() && env_key.is_some() {
+        return Ok(());
     }
 
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "./google-mcp.db".to_string());
-    let keyfile = format!("{db_url}.keys");
+    let keyfile = PathBuf::from(format!("{db_url}.keys"));
 
-    let (mut jwt, mut key) = (None, None);
-    if let Ok(content) = std::fs::read_to_string(&keyfile) {
-        for line in content.lines() {
-            if let Some(v) = line.strip_prefix("JWT_SECRET=") {
-                jwt = Some(v.to_string());
-            } else if let Some(v) = line.strip_prefix("STORAGE_ENCRYPTION_KEY=") {
-                key = Some(v.to_string());
+    let (mut file_jwt, mut file_key) = (None, None);
+    match std::fs::read_to_string(&keyfile) {
+        Ok(content) => {
+            for line in content.lines() {
+                if let Some(v) = line.strip_prefix("JWT_SECRET=").filter(|v| !v.is_empty()) {
+                    file_jwt = Some(v.to_string());
+                } else if let Some(v) = line
+                    .strip_prefix("STORAGE_ENCRYPTION_KEY=")
+                    .filter(|v| !v.is_empty())
+                {
+                    file_key = Some(v.to_string());
+                }
             }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("could not read {}: {e}", keyfile.display())),
     }
 
-    use rand::RngCore;
-    let mut rng = rand::rngs::OsRng;
-    let jwt = jwt.unwrap_or_else(|| {
-        let mut b = [0u8; 64];
-        rng.fill_bytes(&mut b);
-        b.iter().map(|x| format!("{x:02x}")).collect()
-    });
-    let key = key.unwrap_or_else(|| {
-        use base64::Engine;
-        let mut b = [0u8; 32];
-        rng.fill_bytes(&mut b);
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
-    });
+    // Prefer an env-supplied value even when persisting, so the keyfile and the
+    // running process never disagree about a secret.
+    let jwt = env_jwt
+        .clone()
+        .or(file_jwt.clone())
+        .unwrap_or_else(random_hex_64);
+    let key = env_key
+        .clone()
+        .or(file_key.clone())
+        .unwrap_or_else(random_storage_key);
 
-    if let Ok(mut f) = std::fs::File::create(&keyfile) {
-        let _ = writeln!(f, "JWT_SECRET={jwt}");
-        let _ = writeln!(f, "STORAGE_ENCRYPTION_KEY={key}");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&keyfile, std::fs::Permissions::from_mode(0o600));
-        }
+    // Only rewrite when the file does not already hold exactly these values.
+    // Rewriting on every launch would risk truncating a perfectly good keyfile,
+    // and losing STORAGE_ENCRYPTION_KEY makes every stored token undecryptable.
+    if file_jwt.as_deref() != Some(&jwt) || file_key.as_deref() != Some(&key) {
+        write_keyfile(&keyfile, &jwt, &key)?;
     }
 
-    // SAFETY: called at process startup before any task reads the environment.
+    // SAFETY: `set_var` requires that no other thread concurrently reads or
+    // writes the environment. This runs at the top of the chosen subcommand,
+    // before any task or client has been spawned, so the tokio workers are
+    // parked and nothing else touches the environment.
     unsafe {
-        if need_jwt {
+        if env_jwt.is_none() {
             std::env::set_var("JWT_SECRET", &jwt);
         }
-        if need_key {
+        if env_key.is_none() {
             std::env::set_var("STORAGE_ENCRYPTION_KEY", &key);
         }
     }
+    Ok(())
+}
+
+fn optional_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+fn random_hex_64() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 64];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn random_storage_key() -> String {
+    use base64::Engine;
+    use rand::RngCore;
+    let mut b = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+}
+
+/// Write the keyfile atomically and never world-readable.
+///
+/// The temp file is created with `create_new` at mode `0600`, so the secrets are
+/// never briefly readable by other local users (a plain create-then-chmod leaves
+/// exactly that window) and a pre-planted symlink cannot redirect the write. The
+/// rename is atomic, so an interrupted run can never leave a half-written or
+/// empty keyfile behind.
+fn write_keyfile(path: &Path, jwt: &str, key: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+    let _ = std::fs::remove_file(&tmp);
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(&tmp)
+        .map_err(|e| format!("could not create {}: {e}", tmp.display()))?;
+
+    let write = (|| -> std::io::Result<()> {
+        writeln!(f, "JWT_SECRET={jwt}")?;
+        writeln!(f, "STORAGE_ENCRYPTION_KEY={key}")?;
+        f.sync_all()
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("could not write {}: {e}", tmp.display()));
+    }
+    drop(f);
+
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("could not install {}: {e}", path.display())
+    })
 }
 
 fn build_oauth_client(cfg: &ServerConfig, http: &Arc<reqwest::Client>) -> GoogleOAuthClient {
@@ -226,7 +289,14 @@ async fn run_http() {
 async fn run_stdio() {
     init_tracing(true); // stderr only — stdout is the MCP channel
 
-    ensure_local_secrets();
+    // Load `.env` first: `ensure_local_secrets` injects into the process
+    // environment, and dotenvy will not overwrite an already-set variable, so
+    // provisioning before this would shadow a `.env`-supplied key.
+    let _ = dotenvy::dotenv();
+    if let Err(e) = ensure_local_secrets() {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
     let cfg = load_config();
     let db = open_database(&cfg).await;
     let http = Arc::new(google_http::build());
@@ -237,12 +307,24 @@ async fn run_stdio() {
         cfg.storage_encryption_key,
     );
 
-    let sub = accounts::first_google_sub(&db).await.unwrap_or(None);
+    let sub = match accounts::latest_google_sub(&db).await {
+        Ok(sub) => sub,
+        Err(e) => {
+            // Do not silently degrade to "no account": that would tell the user
+            // to sign in when the real problem is the store.
+            eprintln!("could not read the local account store: {e}");
+            std::process::exit(2);
+        }
+    };
     match &sub {
         Some(s) => tracing::info!("single-tenant stdio bound to account sub={s}"),
-        None => tracing::warn!("no Google account connected yet — run `google-mcp auth` once"),
+        None => tracing::warn!(
+            "no Google account connected yet — use the `google_authenticate` tool to sign in"
+        ),
     }
-    let tenancy = Tenancy::Single(sub.map(|s| Arc::from(s.as_str())));
+    let tenancy = Tenancy::Single(Arc::new(std::sync::RwLock::new(
+        sub.map(|s| Arc::from(s.as_str())),
+    )));
 
     let state = AppState {
         config: Arc::new(cfg),
@@ -275,7 +357,14 @@ async fn run_stdio() {
 async fn run_auth() {
     init_tracing(true);
 
-    ensure_local_secrets();
+    // Load `.env` first: `ensure_local_secrets` injects into the process
+    // environment, and dotenvy will not overwrite an already-set variable, so
+    // provisioning before this would shadow a `.env`-supplied key.
+    let _ = dotenvy::dotenv();
+    if let Err(e) = ensure_local_secrets() {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
     let cfg = load_config();
     let db = open_database(&cfg).await;
     let http = Arc::new(google_http::build());
