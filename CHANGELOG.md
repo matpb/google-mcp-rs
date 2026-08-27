@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-27
+
+### Added
+
+- **Tasks domain (13 tools)** — `tasks_list_tasklists`, `tasks_get_tasklist`,
+  `tasks_create_tasklist`, `tasks_update_tasklist`, `tasks_delete_tasklist`,
+  `tasks_list`, `tasks_get`, `tasks_create`, `tasks_update`, `tasks_complete`,
+  `tasks_move`, `tasks_delete`, `tasks_clear_completed`. Full surface is now
+  **89 tools** across six domains.
+- `ENABLED_DOMAINS` accepts `tasks`, which requests the
+  `https://www.googleapis.com/auth/tasks` scope at consent time.
+
+### Notes
+
+- Google Tasks stores `due` as a **date only** — a supplied time of day is
+  discarded server-side.
+- Existing authorizations do not carry the new scope. Users must re-authorize
+  at `/authorize` (or re-run `google-mcp auth`) before the Tasks tools work.
+
 ## [0.8.0] - 2026-07-23
 
 Adds a second transport so the server can run as a local **Claude Desktop

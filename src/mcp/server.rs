@@ -65,6 +65,7 @@ impl GoogleMcp {
             Domain::Drive => Self::drive_router(),
             Domain::Docs => Self::docs_router(),
             Domain::Calendar => Self::calendar_router(),
+            Domain::Tasks => Self::tasks_router(),
         }
     }
 
@@ -232,6 +233,7 @@ mod harness {
             Domain::Drive => 14,
             Domain::Docs => 12,
             Domain::Calendar => 14,
+            Domain::Tasks => 13,
         }
     }
 }
@@ -402,6 +404,7 @@ mod tests {
             Domain::Sheets,
             Domain::Docs,
             Domain::Calendar,
+            Domain::Tasks,
         ])
         .await;
         let full_names: std::collections::HashSet<_> = tool_names(&full).into_iter().collect();
@@ -461,7 +464,7 @@ impl ServerHandler for GoogleMcp {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
-        let base = "Google Workspace MCP — Gmail + Sheets + Drive + Docs + Calendar. \
+        let base = "Google Workspace MCP — Gmail + Sheets + Drive + Docs + Calendar + Tasks. \
              Multi-tenant: each user authorizes via the OAuth flow at \
              /authorize and the server mints an MCP JWT bound to their \
              Google sub. All tools operate on the authenticated user's \

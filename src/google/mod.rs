@@ -7,3 +7,4 @@ pub mod gmail;
 pub mod http;
 pub mod session;
 pub mod sheets;
+pub mod tasks;

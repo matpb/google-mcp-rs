@@ -4,13 +4,13 @@ A multi-tenant **Model Context Protocol** server for **Google Workspace**, writt
 
 It also runs in **single-tenant stdio mode**, packaged as a one-click **Claude Desktop extension** ([`.mcpb`](#quick-start--claude-desktop-extension-mcpb)) — no TLS certificate, no tunnel, no inbound network exposure.
 
-> **Status:** v0.8.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) live. **76 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. Claude Desktop bundles add a 77th tool, `google_authenticate`, for in-chat sign-in.
+> **Status:** v0.9.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) live. **89 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. Claude Desktop bundles add a 90th tool, `google_authenticate`, for in-chat sign-in.
 
 ## Why
 
 The first-party Google Workspace MCP server is missing fundamentals (you cannot send an email from it). Existing community servers are Python or single-tenant. `google-mcp-rs` aims to be the Rust server you actually want to deploy:
 
-- **Full Gmail / Sheets / Drive / Docs / Calendar surface** — 76 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), and Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence).
+- **Full Gmail / Sheets / Drive / Docs / Calendar / Tasks surface** — 89 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence), and Google Tasks (task lists + tasks CRUD, subtasks, reordering, completion, cross-list moves).
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256.
 - **Two transports, one binary** — **streamable HTTP** (multi-tenant: one running instance serves many MCP clients and many Google accounts at once), or **stdio** (single-tenant: Claude Desktop launches it as a local child process, no TLS and nothing on the network). See [Quick start — Claude Desktop](#quick-start--claude-desktop-extension-mcpb).
@@ -98,7 +98,7 @@ To build the bundle yourself, or to scope the tool surface down, see [`mcpb/READ
 In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
 
 1. Pick or create a GCP project.
-2. Enable the **Gmail API**, **Sheets API**, **Drive API**, **Docs API**, and **Calendar API**.
+2. Enable the **Gmail API**, **Sheets API**, **Drive API**, **Docs API**, **Calendar API**, and **Tasks API**.
 3. **OAuth consent screen** → External, app name `google-mcp` (or whatever you want users to see), user support email, developer email.
 4. Add scopes:
    - `openid`
@@ -108,6 +108,7 @@ In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
    - `https://www.googleapis.com/auth/drive`
    - `https://www.googleapis.com/auth/documents`
    - `https://www.googleapis.com/auth/calendar`
+   - `https://www.googleapis.com/auth/tasks`
 5. Add yourself + any beta users to the **Test users** list (until the app is verified, only test users can authorize — see [Caveats](#caveats)).
 6. **Credentials** → **Create credentials** → **OAuth 2.0 Client ID** → **Web application**.
 7. Authorized redirect URI: `${BASE_URL}/oauth/google/callback` (e.g. `http://localhost:8433/oauth/google/callback` for dev).
@@ -158,19 +159,20 @@ For **Claude.ai / ChatGPT custom connectors / Cursor**, add a custom connector p
 | `MCP_HOST` | no | `0.0.0.0` | Bind address |
 | `MCP_PORT` | no | `8433` | Listen port |
 | `CORS_ALLOW_LOCALHOST` | no | `false` | Allow `http://localhost:*` in CORS (dev only) |
-| `ENABLED_DOMAINS` | no | all five | Comma-separated subset of `gmail,sheets,drive,docs,calendar`. Filters both the MCP tool surface and the OAuth scopes requested from Google. Unset = all five. See [Scoping the surface](#scoping-the-surface) below. |
+| `ENABLED_DOMAINS` | no | all six | Comma-separated subset of `gmail,sheets,drive,docs,calendar,tasks`. Filters both the MCP tool surface and the OAuth scopes requested from Google. Unset = all six. See [Scoping the surface](#scoping-the-surface) below. |
 | `FILE_ROOT` | no | — (disabled) | Absolute path to the file-exchange directory, bind-mounted into the container at the same path. Enables attaching/uploading by `path` and saving downloads by `dest_path` instead of base64. Unset = base64-only. See [File handling](#file-handling-attachments-uploads-downloads) below. |
 | `FILE_MAINTENANCE_TOOLS` | no | `off` | Whether the directory-maintenance tools are exposed: `off` (neither), `info` (read-only `files_info`), or `full` (`files_info` + the deleting `files_cleanup`). Off by default, so no deletion/listing tool exists unless you opt in. Only meaningful when `FILE_ROOT` is set. |
 | `RUST_LOG` | no | `google_mcp=info,rmcp=warn,reqwest=warn` | Tracing filter — keep `reqwest` ≤ `warn` to avoid logging URLs with PII |
 
 ## Scoping the surface
 
-By default, the server exposes all 76 tools across all five Workspace domains and asks Google for the matching scope set during consent. For deployments that only need part of the surface, set `ENABLED_DOMAINS` to a comma-separated subset:
+By default, the server exposes all 89 tools across all six Workspace domains and asks Google for the matching scope set during consent. For deployments that only need part of the surface, set `ENABLED_DOMAINS` to a comma-separated subset:
 
 ```bash
 ENABLED_DOMAINS=gmail            # Gmail-only: 25 tools, gmail.modify scope
 ENABLED_DOMAINS=gmail,calendar   # email + calendaring: 39 tools
 ENABLED_DOMAINS=docs,drive       # document workflow: 26 tools
+ENABLED_DOMAINS=calendar,tasks   # planning only: 27 tools
 ```
 
 Two things shrink in lockstep:
@@ -331,6 +333,26 @@ Anything under a `keep/` subdirectory of `FILE_ROOT` is invisible to `files_clea
 | `calendar_list_colors` | Calendar + event color palette (for `colorId`) |
 
 > **Default `send_updates=none`.** Calendar mutations don't email guests by default — pass `send_updates="all"` (or `"externalOnly"`) explicitly when you want a notification. This keeps agents from spamming inboxes during retries or batch operations.
+
+### Tasks (13)
+
+| Tool | Purpose |
+|---|---|
+| `tasks_list_tasklists` | List the user's task lists — use to discover `tasklist_id`s (`@default` is always the default list) |
+| `tasks_get_tasklist` | Get one task list's metadata |
+| `tasks_create_tasklist` | Create a task list |
+| `tasks_update_tasklist` | Rename a task list |
+| `tasks_delete_tasklist` | **Irreversibly** delete a task list and everything in it |
+| `tasks_list` | List tasks in a list. Filter by `due_min`/`due_max`/`updated_min`, toggle `show_completed`/`show_hidden`/`show_deleted` |
+| `tasks_get` | Get a single task by ID |
+| `tasks_create` | Create a task — `title`, `notes`, `due`, optional `parent` (subtask) and `previous` (position) |
+| `tasks_update` | Partial update of `title` / `notes` / `due` / `status`. `due=""` clears the date |
+| `tasks_complete` | Tick a task off, or reopen it with `completed=false` |
+| `tasks_move` | Reparent, reorder, or move a task to another list |
+| `tasks_delete` | Soft-delete a task (still visible with `show_deleted=true`) |
+| `tasks_clear_completed` | Hide every completed task in a list (the UI's "Delete all completed tasks") |
+
+> **`due` is a date, not a datetime.** Google Tasks accepts RFC3339 but stores only the date part and silently discards the time of day. A task cannot carry a due time — use Calendar for that.
 
 ## Error contract
 

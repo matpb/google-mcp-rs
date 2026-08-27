@@ -1077,3 +1077,145 @@ pub struct CalendarFreebusyParams {
     #[serde(default)]
     pub time_zone: Option<String>,
 }
+
+// ===========================================================================
+// Tasks
+// ===========================================================================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TasksListTasklistsParams {
+    /// Page size (max 100).
+    #[serde(default)]
+    pub max_results: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TasksTasklistIdParams {
+    /// Task list ID, or `@default` for the user's default list.
+    pub tasklist_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TasksCreateTasklistParams {
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TasksUpdateTasklistParams {
+    pub tasklist_id: String,
+    /// New title for the list.
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TasksListParams {
+    /// Task list ID, or `@default` for the user's default list.
+    #[serde(default = "default_tasklist")]
+    pub tasklist_id: String,
+    /// Include completed tasks. Default true.
+    #[serde(default = "default_true")]
+    pub show_completed: bool,
+    /// Include hidden (completed and cleared from the UI) tasks. Default false.
+    #[serde(default)]
+    pub show_hidden: bool,
+    /// Include deleted tasks. Default false.
+    #[serde(default)]
+    pub show_deleted: bool,
+    /// RFC3339 lower bound on `due`.
+    #[serde(default)]
+    pub due_min: Option<String>,
+    /// RFC3339 upper bound on `due`.
+    #[serde(default)]
+    pub due_max: Option<String>,
+    #[serde(default)]
+    pub completed_min: Option<String>,
+    #[serde(default)]
+    pub completed_max: Option<String>,
+    #[serde(default)]
+    pub updated_min: Option<String>,
+    /// Page size (max 100).
+    #[serde(default)]
+    pub max_results: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TasksTaskIdParams {
+    #[serde(default = "default_tasklist")]
+    pub tasklist_id: String,
+    pub task_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TasksCreateParams {
+    /// Task list ID, or `@default` for the user's default list.
+    #[serde(default = "default_tasklist")]
+    pub tasklist_id: String,
+    pub title: String,
+    /// Free-text notes (max 8192 characters).
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// Due date as RFC3339. Google Tasks stores the DATE only — the time
+    /// component is accepted and then discarded.
+    #[serde(default)]
+    pub due: Option<String>,
+    /// Create as a subtask of this task ID.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// Insert directly after this sibling task ID (omit for top of the list).
+    #[serde(default)]
+    pub previous: Option<String>,
+    /// Mark it already done on creation.
+    #[serde(default)]
+    pub completed: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TasksUpdateParams {
+    #[serde(default = "default_tasklist")]
+    pub tasklist_id: String,
+    pub task_id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// RFC3339 due date. Pass `""` to clear it.
+    #[serde(default)]
+    pub due: Option<String>,
+    /// `needsAction` or `completed`.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TasksCompleteParams {
+    #[serde(default = "default_tasklist")]
+    pub tasklist_id: String,
+    pub task_id: String,
+    /// Set false to reopen a completed task.
+    #[serde(default = "default_true")]
+    pub completed: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TasksMoveParams {
+    #[serde(default = "default_tasklist")]
+    pub tasklist_id: String,
+    pub task_id: String,
+    /// New parent task ID (makes it a subtask). Omit to keep it top-level.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// Place directly after this sibling task ID. Omit to move to the top.
+    #[serde(default)]
+    pub previous: Option<String>,
+    /// Move to a different task list.
+    #[serde(default)]
+    pub destination_tasklist: Option<String>,
+}
+
+fn default_tasklist() -> String {
+    "@default".to_string()
+}

@@ -30,6 +30,7 @@ use crate::google::drive::DriveError;
 use crate::google::gmail::GmailError;
 use crate::google::session::SessionError;
 use crate::google::sheets::SheetsError;
+use crate::google::tasks::TasksError;
 use crate::mime::MimeError;
 use crate::oauth::{GoogleOAuthError, JwtError};
 
@@ -218,6 +219,8 @@ fn default_not_found_hint(kind: &str) -> String {
         "permission" => "Use drive_list_permissions to discover valid permission IDs for a file.".into(),
         "calendar" => "Use calendar_list_calendars to discover valid calendar IDs (or use \"primary\" for the user's main calendar).".into(),
         "event" => "Use calendar_list_events to discover valid event IDs.".into(),
+        "tasklist" => "Use tasks_list_tasklists to discover valid task list IDs (or use \"@default\" for the user's default list).".into(),
+        "task" => "Use tasks_list to discover valid task IDs within a list.".into(),
         _ => format!("Verify the {kind} ID exists."),
     }
 }
@@ -657,6 +660,21 @@ fn oauth_reconnect_url(err: &str) -> Option<String> {
     match err {
         "invalid_grant" | "invalid_token" => Some("/authorize".into()),
         _ => None,
+    }
+}
+
+impl From<TasksError> for McpError {
+    fn from(e: TasksError) -> Self {
+        match e {
+            TasksError::Http(err) => transient_from_reqwest("tasks", err),
+            TasksError::Api { status, message } => {
+                google_api_error("tasks", status.as_u16(), message, None)
+            }
+            TasksError::Parse(err) => {
+                McpError::internal(format!("could not parse Tasks response: {err}"))
+                    .with_service("tasks")
+            }
+        }
     }
 }
 

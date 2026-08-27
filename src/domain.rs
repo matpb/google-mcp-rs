@@ -3,7 +3,7 @@
 //! which OAuth scopes are requested from Google (so the consent screen
 //! doesn't ask for permissions the operator never intends to use).
 //!
-//! Unset or empty `ENABLED_DOMAINS` means all five domains, which is the
+//! Unset or empty `ENABLED_DOMAINS` means all six domains, which is the
 //! historical behavior and remains the default.
 
 use std::collections::HashSet;
@@ -16,15 +16,17 @@ pub enum Domain {
     Drive,
     Docs,
     Calendar,
+    Tasks,
 }
 
 impl Domain {
-    pub const ALL: [Domain; 5] = [
+    pub const ALL: [Domain; 6] = [
         Domain::Gmail,
         Domain::Sheets,
         Domain::Drive,
         Domain::Docs,
         Domain::Calendar,
+        Domain::Tasks,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -34,6 +36,7 @@ impl Domain {
             Domain::Drive => "drive",
             Domain::Docs => "docs",
             Domain::Calendar => "calendar",
+            Domain::Tasks => "tasks",
         }
     }
 
@@ -45,6 +48,7 @@ impl Domain {
             Domain::Drive => "https://www.googleapis.com/auth/drive",
             Domain::Docs => "https://www.googleapis.com/auth/documents",
             Domain::Calendar => "https://www.googleapis.com/auth/calendar",
+            Domain::Tasks => "https://www.googleapis.com/auth/tasks",
         }
     }
 }
@@ -64,8 +68,9 @@ impl FromStr for Domain {
             "drive" => Ok(Domain::Drive),
             "docs" => Ok(Domain::Docs),
             "calendar" => Ok(Domain::Calendar),
+            "tasks" => Ok(Domain::Tasks),
             other => Err(format!(
-                "unknown domain '{other}': expected one of gmail, sheets, drive, docs, calendar"
+                "unknown domain '{other}': expected one of gmail, sheets, drive, docs, calendar, tasks"
             )),
         }
     }
@@ -129,6 +134,7 @@ mod tests {
             parse_enabled(Some("calendar")).unwrap(),
             vec![Domain::Calendar]
         );
+        assert_eq!(parse_enabled(Some("tasks")).unwrap(), vec![Domain::Tasks]);
     }
 
     #[test]
@@ -152,6 +158,10 @@ mod tests {
         assert_eq!(
             Domain::Calendar.google_scope(),
             "https://www.googleapis.com/auth/calendar"
+        );
+        assert_eq!(
+            Domain::Tasks.google_scope(),
+            "https://www.googleapis.com/auth/tasks"
         );
     }
 
@@ -226,13 +236,14 @@ mod tests {
     #[test]
     fn google_scopes_for_all_returns_full_set() {
         let s = google_scopes(&Domain::ALL);
-        assert_eq!(s.len(), 7);
+        assert_eq!(s.len(), 8);
         for needle in [
             "gmail.modify",
             "spreadsheets",
             "/drive",
             "documents",
-            "calendar",
+            "auth/calendar",
+            "auth/tasks",
         ] {
             assert!(
                 s.iter().any(|x| x.contains(needle)),
