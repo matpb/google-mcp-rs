@@ -5,6 +5,7 @@ pub mod docs;
 pub mod drive;
 pub mod gmail;
 pub mod http;
+pub mod people;
 pub mod session;
 pub mod sheets;
 pub mod tasks;

@@ -1219,3 +1219,169 @@ pub struct TasksMoveParams {
 fn default_tasklist() -> String {
     "@default".to_string()
 }
+
+// ---------------------------------------------------------------------------
+// People (Contacts)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleListContactsParams {
+    /// Comma-separated field mask, e.g. `names,emailAddresses`. Defaults to a
+    /// broad set covering the usual contact card.
+    #[serde(default)]
+    pub person_fields: Option<String>,
+    /// Page size (max 1000).
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+    /// `LAST_MODIFIED_ASCENDING`, `LAST_MODIFIED_DESCENDING`,
+    /// `FIRST_NAME_ASCENDING`, or `LAST_NAME_ASCENDING`.
+    #[serde(default)]
+    pub sort_order: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleGetContactParams {
+    /// Contact resource name (`people/c123...`) or the bare ID.
+    pub resource_name: String,
+    #[serde(default)]
+    pub person_fields: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleBatchGetContactsParams {
+    /// Up to 200 contact resource names or bare IDs.
+    pub resource_names: Vec<String>,
+    #[serde(default)]
+    pub person_fields: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleSearchContactsParams {
+    /// Prefix-matched against names, nicknames, emails, phones and organizations.
+    pub query: String,
+    #[serde(default)]
+    pub person_fields: Option<String>,
+    /// Page size (max 30).
+    #[serde(default)]
+    pub page_size: Option<u32>,
+}
+
+/// Shared contact payload: supplied fields are the ones written.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleContactFields {
+    #[serde(default)]
+    pub given_name: Option<String>,
+    #[serde(default)]
+    pub family_name: Option<String>,
+    #[serde(default)]
+    pub middle_name: Option<String>,
+    #[serde(default)]
+    pub nickname: Option<String>,
+    /// Email addresses, in order. Replaces every existing address.
+    #[serde(default)]
+    pub emails: Option<Vec<String>>,
+    /// Phone numbers, in order. Replaces every existing number.
+    #[serde(default)]
+    pub phones: Option<Vec<String>>,
+    #[serde(default)]
+    pub organization: Option<String>,
+    #[serde(default)]
+    pub job_title: Option<String>,
+    /// Free-text note on the contact.
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// `YYYY-MM-DD`, or `--MM-DD` for a birthday with no year.
+    #[serde(default)]
+    pub birthday: Option<String>,
+    /// Postal addresses as single formatted strings.
+    #[serde(default)]
+    pub addresses: Option<Vec<String>>,
+    #[serde(default)]
+    pub urls: Option<Vec<String>>,
+    /// Raw People `Person` resource. When set, the convenience fields above
+    /// are ignored and this is sent verbatim.
+    #[serde(default)]
+    #[schemars(schema_with = "schema_optional_any_object")]
+    pub person: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleCreateContactParams {
+    #[serde(flatten)]
+    pub fields: PeopleContactFields,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleUpdateContactParams {
+    /// Contact resource name (`people/c123...`) or the bare ID.
+    pub resource_name: String,
+    #[serde(flatten)]
+    pub fields: PeopleContactFields,
+    /// Concurrency token from a previous read. Fetched automatically when omitted.
+    #[serde(default)]
+    pub etag: Option<String>,
+    /// Comma-separated field mask. Derived from the fields you supply when omitted.
+    #[serde(default)]
+    pub update_person_fields: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleDeleteContactParams {
+    /// Contact resource name (`people/c123...`) or the bare ID.
+    pub resource_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleListContactGroupsParams {
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleGetContactGroupParams {
+    /// Group resource name (`contactGroups/xyz`) or the bare ID.
+    pub resource_name: String,
+    /// How many member resource names to return (0 = none, max 1000).
+    #[serde(default)]
+    pub max_members: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleCreateContactGroupParams {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleUpdateContactGroupParams {
+    /// Group resource name (`contactGroups/xyz`) or the bare ID.
+    pub resource_name: String,
+    pub name: String,
+    /// Concurrency token from a previous read. Fetched automatically when omitted.
+    #[serde(default)]
+    pub etag: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleDeleteContactGroupParams {
+    /// Group resource name (`contactGroups/xyz`) or the bare ID.
+    pub resource_name: String,
+    /// Also delete the contacts in the group, not just the group itself.
+    #[serde(default)]
+    pub delete_contacts: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeopleModifyContactGroupMembersParams {
+    /// Group resource name (`contactGroups/xyz`) or the bare ID.
+    pub resource_name: String,
+    /// Contact resource names or bare IDs to add (max 1000 per call).
+    #[serde(default)]
+    pub add: Vec<String>,
+    /// Contact resource names or bare IDs to remove.
+    #[serde(default)]
+    pub remove: Vec<String>,
+}

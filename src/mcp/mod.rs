@@ -7,6 +7,7 @@ pub mod drive_tools;
 pub mod files_tools;
 pub mod gmail_tools;
 pub mod params;
+pub mod people_tools;
 pub mod server;
 pub mod sheets_tools;
 pub mod tasks_tools;

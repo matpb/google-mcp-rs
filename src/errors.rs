@@ -28,6 +28,7 @@ use crate::google::calendar::CalendarError;
 use crate::google::docs::DocsError;
 use crate::google::drive::DriveError;
 use crate::google::gmail::GmailError;
+use crate::google::people::PeopleError;
 use crate::google::session::SessionError;
 use crate::google::sheets::SheetsError;
 use crate::google::tasks::TasksError;
@@ -660,6 +661,21 @@ fn oauth_reconnect_url(err: &str) -> Option<String> {
     match err {
         "invalid_grant" | "invalid_token" => Some("/authorize".into()),
         _ => None,
+    }
+}
+
+impl From<PeopleError> for McpError {
+    fn from(e: PeopleError) -> Self {
+        match e {
+            PeopleError::Http(err) => transient_from_reqwest("people", err),
+            PeopleError::Api { status, message } => {
+                google_api_error("people", status.as_u16(), message, None)
+            }
+            PeopleError::Parse(err) => {
+                McpError::internal(format!("could not parse People response: {err}"))
+                    .with_service("people")
+            }
+        }
     }
 }
 

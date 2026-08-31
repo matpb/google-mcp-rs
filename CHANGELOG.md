@@ -5,6 +5,33 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-08-31
+
+### Added
+
+- **People / Contacts domain (13 tools)** — `people_list_contacts`,
+  `people_get_contact`, `people_batch_get_contacts`, `people_search_contacts`,
+  `people_create_contact`, `people_update_contact`, `people_delete_contact`,
+  `people_list_contact_groups`, `people_get_contact_group`,
+  `people_create_contact_group`, `people_update_contact_group`,
+  `people_delete_contact_group`, `people_modify_contact_group_members`.
+  Full surface is now **102 tools** across seven domains.
+- `ENABLED_DOMAINS` accepts `people` (and `contacts` as an alias), which
+  requests the `https://www.googleapis.com/auth/contacts` scope at consent time.
+- Contact IDs may be passed bare (`c123`) or fully qualified (`people/c123`);
+  the same applies to group IDs and `contactGroups/`.
+
+### Notes
+
+- `people_update_contact` **replaces** each field group it is given rather than
+  appending to it. Its `etag` and `updatePersonFields` are fetched and derived
+  automatically when omitted.
+- `people_search_contacts` is prefix-matched, and the client issues Google's
+  required warmup request before each search.
+- Requires the **People API** to be enabled on the OAuth project. Existing
+  authorizations do not carry the new scope; users must re-authorize at
+  `/authorize` (or re-run `google-mcp auth`) before the contacts tools work.
+
 ## [0.9.0] - 2026-08-27
 
 ### Added

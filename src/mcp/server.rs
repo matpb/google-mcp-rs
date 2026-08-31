@@ -66,6 +66,7 @@ impl GoogleMcp {
             Domain::Docs => Self::docs_router(),
             Domain::Calendar => Self::calendar_router(),
             Domain::Tasks => Self::tasks_router(),
+            Domain::People => Self::people_router(),
         }
     }
 
@@ -234,6 +235,7 @@ mod harness {
             Domain::Docs => 12,
             Domain::Calendar => 14,
             Domain::Tasks => 13,
+            Domain::People => 13,
         }
     }
 }
@@ -405,6 +407,7 @@ mod tests {
             Domain::Docs,
             Domain::Calendar,
             Domain::Tasks,
+            Domain::People,
         ])
         .await;
         let full_names: std::collections::HashSet<_> = tool_names(&full).into_iter().collect();

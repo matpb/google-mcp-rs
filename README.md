@@ -4,13 +4,13 @@ A multi-tenant **Model Context Protocol** server for **Google Workspace**, writt
 
 It also runs in **single-tenant stdio mode**, packaged as a one-click **Claude Desktop extension** ([`.mcpb`](#quick-start--claude-desktop-extension-mcpb)) — no TLS certificate, no tunnel, no inbound network exposure.
 
-> **Status:** v0.9.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) live. **89 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. Claude Desktop bundles add a 90th tool, `google_authenticate`, for in-chat sign-in.
+> **Status:** v0.10.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) live. **102 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. Claude Desktop bundles add a 103rd tool, `google_authenticate`, for in-chat sign-in.
 
 ## Why
 
 The first-party Google Workspace MCP server is missing fundamentals (you cannot send an email from it). Existing community servers are Python or single-tenant. `google-mcp-rs` aims to be the Rust server you actually want to deploy:
 
-- **Full Gmail / Sheets / Drive / Docs / Calendar / Tasks surface** — 89 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence), and Google Tasks (task lists + tasks CRUD, subtasks, reordering, completion, cross-list moves).
+- **Full Gmail / Sheets / Drive / Docs / Calendar / Tasks / Contacts surface** — 102 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence), Google Tasks (task lists + tasks CRUD, subtasks, reordering, completion, cross-list moves), and Google Contacts (contact CRUD, prefix search, contact groups/labels and their membership).
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256.
 - **Two transports, one binary** — **streamable HTTP** (multi-tenant: one running instance serves many MCP clients and many Google accounts at once), or **stdio** (single-tenant: Claude Desktop launches it as a local child process, no TLS and nothing on the network). See [Quick start — Claude Desktop](#quick-start--claude-desktop-extension-mcpb).
@@ -98,7 +98,7 @@ To build the bundle yourself, or to scope the tool surface down, see [`mcpb/READ
 In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
 
 1. Pick or create a GCP project.
-2. Enable the **Gmail API**, **Sheets API**, **Drive API**, **Docs API**, **Calendar API**, and **Tasks API**.
+2. Enable the **Gmail API**, **Sheets API**, **Drive API**, **Docs API**, **Calendar API**, **Tasks API**, and **People API**.
 3. **OAuth consent screen** → External, app name `google-mcp` (or whatever you want users to see), user support email, developer email.
 4. Add scopes:
    - `openid`
@@ -109,6 +109,7 @@ In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
    - `https://www.googleapis.com/auth/documents`
    - `https://www.googleapis.com/auth/calendar`
    - `https://www.googleapis.com/auth/tasks`
+   - `https://www.googleapis.com/auth/contacts`
 5. Add yourself + any beta users to the **Test users** list (until the app is verified, only test users can authorize — see [Caveats](#caveats)).
 6. **Credentials** → **Create credentials** → **OAuth 2.0 Client ID** → **Web application**.
 7. Authorized redirect URI: `${BASE_URL}/oauth/google/callback` (e.g. `http://localhost:8433/oauth/google/callback` for dev).
@@ -159,20 +160,21 @@ For **Claude.ai / ChatGPT custom connectors / Cursor**, add a custom connector p
 | `MCP_HOST` | no | `0.0.0.0` | Bind address |
 | `MCP_PORT` | no | `8433` | Listen port |
 | `CORS_ALLOW_LOCALHOST` | no | `false` | Allow `http://localhost:*` in CORS (dev only) |
-| `ENABLED_DOMAINS` | no | all six | Comma-separated subset of `gmail,sheets,drive,docs,calendar,tasks`. Filters both the MCP tool surface and the OAuth scopes requested from Google. Unset = all six. See [Scoping the surface](#scoping-the-surface) below. |
+| `ENABLED_DOMAINS` | no | all seven | Comma-separated subset of `gmail,sheets,drive,docs,calendar,tasks,people` (`contacts` is accepted as an alias for `people`). Filters both the MCP tool surface and the OAuth scopes requested from Google. Unset = all seven. See [Scoping the surface](#scoping-the-surface) below. |
 | `FILE_ROOT` | no | — (disabled) | Absolute path to the file-exchange directory, bind-mounted into the container at the same path. Enables attaching/uploading by `path` and saving downloads by `dest_path` instead of base64. Unset = base64-only. See [File handling](#file-handling-attachments-uploads-downloads) below. |
 | `FILE_MAINTENANCE_TOOLS` | no | `off` | Whether the directory-maintenance tools are exposed: `off` (neither), `info` (read-only `files_info`), or `full` (`files_info` + the deleting `files_cleanup`). Off by default, so no deletion/listing tool exists unless you opt in. Only meaningful when `FILE_ROOT` is set. |
 | `RUST_LOG` | no | `google_mcp=info,rmcp=warn,reqwest=warn` | Tracing filter — keep `reqwest` ≤ `warn` to avoid logging URLs with PII |
 
 ## Scoping the surface
 
-By default, the server exposes all 89 tools across all six Workspace domains and asks Google for the matching scope set during consent. For deployments that only need part of the surface, set `ENABLED_DOMAINS` to a comma-separated subset:
+By default, the server exposes all 102 tools across all seven Workspace domains and asks Google for the matching scope set during consent. For deployments that only need part of the surface, set `ENABLED_DOMAINS` to a comma-separated subset:
 
 ```bash
 ENABLED_DOMAINS=gmail            # Gmail-only: 25 tools, gmail.modify scope
 ENABLED_DOMAINS=gmail,calendar   # email + calendaring: 39 tools
 ENABLED_DOMAINS=docs,drive       # document workflow: 26 tools
 ENABLED_DOMAINS=calendar,tasks   # planning only: 27 tools
+ENABLED_DOMAINS=gmail,people     # email + address book: 38 tools
 ```
 
 Two things shrink in lockstep:
@@ -353,6 +355,28 @@ Anything under a `keep/` subdirectory of `FILE_ROOT` is invisible to `files_clea
 | `tasks_clear_completed` | Hide every completed task in a list (the UI's "Delete all completed tasks") |
 
 > **`due` is a date, not a datetime.** Google Tasks accepts RFC3339 but stores only the date part and silently discards the time of day. A task cannot carry a due time — use Calendar for that.
+
+### People / Contacts (13)
+
+| Tool | Purpose |
+|---|---|
+| `people_list_contacts` | List the whole address book. Returns each contact's `resourceName` (`people/c123...`), which every other people_* tool takes |
+| `people_get_contact` | Get one contact, including the `etag` an update needs |
+| `people_batch_get_contacts` | Get up to 200 contacts in one call |
+| `people_search_contacts` | Prefix search across names, nicknames, emails, phones and organizations — the cheap way to resolve a person to a `resourceName` |
+| `people_create_contact` | Create a contact from `given_name`/`family_name`/`emails`/`phones`/`organization`/`job_title`/`notes`/`birthday`/`addresses`/`urls`, or a raw `person` resource |
+| `people_update_contact` | Update a contact. `etag` and `update_person_fields` are resolved automatically when omitted |
+| `people_delete_contact` | **Irreversibly** delete a contact (People has no trash) |
+| `people_list_contact_groups` | List contact groups (the labels in the Contacts UI), including system groups |
+| `people_get_contact_group` | Get one group; `max_members > 0` also returns its members |
+| `people_create_contact_group` | Create a group (label) |
+| `people_update_contact_group` | Rename a user-created group |
+| `people_delete_contact_group` | Delete a group; `delete_contacts=true` also **irreversibly** deletes its contacts |
+| `people_modify_contact_group_members` | Add or remove contacts from a group, max 1000 per call |
+
+> **Updates replace, they do not append.** Every field group you send to `people_update_contact` overwrites the existing one wholesale — passing one email address leaves the contact with exactly that one. Read the contact first when you mean to add.
+
+> **Search is prefix-matched and needs a warm index.** `jos` finds Joseph; `seph` finds nothing. The client issues Google's required warmup request automatically, so the first search after a change may still lag by a moment.
 
 ## Error contract
 

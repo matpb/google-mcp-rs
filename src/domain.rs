@@ -1,10 +1,5 @@
-//! Workspace domains the server can serve. The `ENABLED_DOMAINS` env var
-//! controls which tool surfaces load (saving agent context tokens) and
-//! which OAuth scopes are requested from Google (so the consent screen
-//! doesn't ask for permissions the operator never intends to use).
-//!
-//! Unset or empty `ENABLED_DOMAINS` means all six domains, which is the
-//! historical behavior and remains the default.
+//! Workspace domains. `ENABLED_DOMAINS` picks which tool surfaces load and
+//! which OAuth scopes are requested; unset or empty means all seven.
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -17,16 +12,18 @@ pub enum Domain {
     Docs,
     Calendar,
     Tasks,
+    People,
 }
 
 impl Domain {
-    pub const ALL: [Domain; 6] = [
+    pub const ALL: [Domain; 7] = [
         Domain::Gmail,
         Domain::Sheets,
         Domain::Drive,
         Domain::Docs,
         Domain::Calendar,
         Domain::Tasks,
+        Domain::People,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -37,6 +34,7 @@ impl Domain {
             Domain::Docs => "docs",
             Domain::Calendar => "calendar",
             Domain::Tasks => "tasks",
+            Domain::People => "people",
         }
     }
 
@@ -49,6 +47,7 @@ impl Domain {
             Domain::Docs => "https://www.googleapis.com/auth/documents",
             Domain::Calendar => "https://www.googleapis.com/auth/calendar",
             Domain::Tasks => "https://www.googleapis.com/auth/tasks",
+            Domain::People => "https://www.googleapis.com/auth/contacts",
         }
     }
 }
@@ -69,8 +68,9 @@ impl FromStr for Domain {
             "docs" => Ok(Domain::Docs),
             "calendar" => Ok(Domain::Calendar),
             "tasks" => Ok(Domain::Tasks),
+            "people" | "contacts" => Ok(Domain::People),
             other => Err(format!(
-                "unknown domain '{other}': expected one of gmail, sheets, drive, docs, calendar, tasks"
+                "unknown domain '{other}': expected one of gmail, sheets, drive, docs, calendar, tasks, people"
             )),
         }
     }
@@ -135,6 +135,19 @@ mod tests {
             vec![Domain::Calendar]
         );
         assert_eq!(parse_enabled(Some("tasks")).unwrap(), vec![Domain::Tasks]);
+        assert_eq!(parse_enabled(Some("people")).unwrap(), vec![Domain::People]);
+    }
+
+    #[test]
+    fn contacts_is_an_alias_for_people() {
+        assert_eq!(
+            parse_enabled(Some("contacts")).unwrap(),
+            vec![Domain::People]
+        );
+        assert_eq!(
+            parse_enabled(Some("CONTACTS")).unwrap(),
+            vec![Domain::People]
+        );
     }
 
     #[test]
@@ -162,6 +175,10 @@ mod tests {
         assert_eq!(
             Domain::Tasks.google_scope(),
             "https://www.googleapis.com/auth/tasks"
+        );
+        assert_eq!(
+            Domain::People.google_scope(),
+            "https://www.googleapis.com/auth/contacts"
         );
     }
 
@@ -236,7 +253,7 @@ mod tests {
     #[test]
     fn google_scopes_for_all_returns_full_set() {
         let s = google_scopes(&Domain::ALL);
-        assert_eq!(s.len(), 8);
+        assert_eq!(s.len(), 9);
         for needle in [
             "gmail.modify",
             "spreadsheets",
@@ -244,6 +261,7 @@ mod tests {
             "documents",
             "auth/calendar",
             "auth/tasks",
+            "auth/contacts",
         ] {
             assert!(
                 s.iter().any(|x| x.contains(needle)),
