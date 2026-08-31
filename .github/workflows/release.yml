@@ -77,6 +77,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Verify manifest version matches Cargo.toml
+        run: |
+          CARGO_VER="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          MCPB_VER="$(python3 -c 'import json;print(json.load(open("mcpb/manifest.json"))["version"])')"
+          if [ "$MCPB_VER" != "$CARGO_VER" ]; then
+            echo "mcpb/manifest.json version $MCPB_VER does not match Cargo.toml version $CARGO_VER"; exit 1
+          fi
       - name: Assemble bundle
         run: |
           mkdir -p mcpb/build/server

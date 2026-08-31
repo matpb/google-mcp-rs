@@ -22,7 +22,7 @@ instead — single-tenant, private, no certificate.
   `google_authenticate` tool (only exposed in stdio mode). It opens a browser
   for Google sign-in via a loopback listener and stores the encrypted refresh
   token locally (`${HOME}/.google-mcp.db`).
-- The full tool surface (Gmail, Sheets, Drive, Docs, Calendar) is exposed.
+- The full tool surface (Gmail, Sheets, Drive, Docs, Calendar, Tasks) is exposed.
   Scope it down by adding an `ENABLED_DOMAINS` env entry (e.g. `sheets,drive`)
   to the manifest if a smaller surface is wanted.
 
