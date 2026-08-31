@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Requires the **People API** to be enabled on the OAuth project. Existing
   authorizations do not carry the new scope; users must re-authorize at
   `/authorize` (or re-run `google-mcp auth`) before the contacts tools work.
+- 0.9.0 was never published as a release, so upgrading from **v0.8.0** picks up
+  the Tasks domain (13 tools) as well — see the 0.9.0 section below.
 
 ## [0.9.0] - 2026-08-27
 
