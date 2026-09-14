@@ -67,6 +67,7 @@ impl GoogleMcp {
             Domain::Calendar => Self::calendar_router(),
             Domain::Tasks => Self::tasks_router(),
             Domain::People => Self::people_router(),
+            Domain::SearchConsole => Self::searchconsole_router(),
         }
     }
 
@@ -236,6 +237,7 @@ mod harness {
             Domain::Calendar => 14,
             Domain::Tasks => 13,
             Domain::People => 13,
+            Domain::SearchConsole => 8,
         }
     }
 }
@@ -408,6 +410,7 @@ mod tests {
             Domain::Calendar,
             Domain::Tasks,
             Domain::People,
+            Domain::SearchConsole,
         ])
         .await;
         let full_names: std::collections::HashSet<_> = tool_names(&full).into_iter().collect();
@@ -467,7 +470,8 @@ impl ServerHandler for GoogleMcp {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
-        let base = "Google Workspace MCP — Gmail + Sheets + Drive + Docs + Calendar + Tasks. \
+        let base = "Google Workspace MCP — Gmail + Sheets + Drive + Docs + Calendar + Tasks + \
+             Contacts + Search Console. \
              Multi-tenant: each user authorizes via the OAuth flow at \
              /authorize and the server mints an MCP JWT bound to their \
              Google sub. All tools operate on the authenticated user's \
@@ -481,7 +485,11 @@ impl ServerHandler for GoogleMcp {
              Calendar event mutations default to `send_updates=none` so \
              agents don't accidentally email guests; pass \
              `send_updates=\"all\"` when the human-facing notification \
-             is intentional.";
+             is intentional. Search Console properties are spelled \
+             `sc-domain:example.com` (Domain property) or \
+             `https://example.com/` (URL-prefix, trailing slash); pass \
+             the `siteUrl` from searchconsole_list_sites verbatim as \
+             `site_url`.";
         info.instructions = Some(format!(
             "{base}\n\n{}",
             file_handling_instructions(self.state.config.file_jail.as_ref())

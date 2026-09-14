@@ -1,5 +1,5 @@
 //! Workspace domains. `ENABLED_DOMAINS` picks which tool surfaces load and
-//! which OAuth scopes are requested; unset or empty means all seven.
+//! which OAuth scopes are requested; unset or empty means all eight.
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -13,10 +13,11 @@ pub enum Domain {
     Calendar,
     Tasks,
     People,
+    SearchConsole,
 }
 
 impl Domain {
-    pub const ALL: [Domain; 7] = [
+    pub const ALL: [Domain; 8] = [
         Domain::Gmail,
         Domain::Sheets,
         Domain::Drive,
@@ -24,6 +25,7 @@ impl Domain {
         Domain::Calendar,
         Domain::Tasks,
         Domain::People,
+        Domain::SearchConsole,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -35,6 +37,7 @@ impl Domain {
             Domain::Calendar => "calendar",
             Domain::Tasks => "tasks",
             Domain::People => "people",
+            Domain::SearchConsole => "searchconsole",
         }
     }
 
@@ -48,6 +51,7 @@ impl Domain {
             Domain::Calendar => "https://www.googleapis.com/auth/calendar",
             Domain::Tasks => "https://www.googleapis.com/auth/tasks",
             Domain::People => "https://www.googleapis.com/auth/contacts",
+            Domain::SearchConsole => "https://www.googleapis.com/auth/webmasters",
         }
     }
 }
@@ -69,8 +73,11 @@ impl FromStr for Domain {
             "calendar" => Ok(Domain::Calendar),
             "tasks" => Ok(Domain::Tasks),
             "people" | "contacts" => Ok(Domain::People),
+            "searchconsole" | "search_console" | "search-console" | "webmasters" => {
+                Ok(Domain::SearchConsole)
+            }
             other => Err(format!(
-                "unknown domain '{other}': expected one of gmail, sheets, drive, docs, calendar, tasks, people"
+                "unknown domain '{other}': expected one of gmail, sheets, drive, docs, calendar, tasks, people, searchconsole"
             )),
         }
     }
@@ -136,6 +143,26 @@ mod tests {
         );
         assert_eq!(parse_enabled(Some("tasks")).unwrap(), vec![Domain::Tasks]);
         assert_eq!(parse_enabled(Some("people")).unwrap(), vec![Domain::People]);
+        assert_eq!(
+            parse_enabled(Some("searchconsole")).unwrap(),
+            vec![Domain::SearchConsole]
+        );
+    }
+
+    #[test]
+    fn search_console_accepts_aliases() {
+        for alias in [
+            "search_console",
+            "search-console",
+            "webmasters",
+            "SearchConsole",
+        ] {
+            assert_eq!(
+                parse_enabled(Some(alias)).unwrap(),
+                vec![Domain::SearchConsole],
+                "{alias}"
+            );
+        }
     }
 
     #[test]
@@ -179,6 +206,10 @@ mod tests {
         assert_eq!(
             Domain::People.google_scope(),
             "https://www.googleapis.com/auth/contacts"
+        );
+        assert_eq!(
+            Domain::SearchConsole.google_scope(),
+            "https://www.googleapis.com/auth/webmasters"
         );
     }
 
@@ -253,7 +284,7 @@ mod tests {
     #[test]
     fn google_scopes_for_all_returns_full_set() {
         let s = google_scopes(&Domain::ALL);
-        assert_eq!(s.len(), 9);
+        assert_eq!(s.len(), 10);
         for needle in [
             "gmail.modify",
             "spreadsheets",
@@ -262,6 +293,7 @@ mod tests {
             "auth/calendar",
             "auth/tasks",
             "auth/contacts",
+            "auth/webmasters",
         ] {
             assert!(
                 s.iter().any(|x| x.contains(needle)),

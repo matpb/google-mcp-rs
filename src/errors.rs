@@ -29,6 +29,7 @@ use crate::google::docs::DocsError;
 use crate::google::drive::DriveError;
 use crate::google::gmail::GmailError;
 use crate::google::people::PeopleError;
+use crate::google::searchconsole::SearchConsoleError;
 use crate::google::session::SessionError;
 use crate::google::sheets::SheetsError;
 use crate::google::tasks::TasksError;
@@ -689,6 +690,21 @@ impl From<TasksError> for McpError {
             TasksError::Parse(err) => {
                 McpError::internal(format!("could not parse Tasks response: {err}"))
                     .with_service("tasks")
+            }
+        }
+    }
+}
+
+impl From<SearchConsoleError> for McpError {
+    fn from(e: SearchConsoleError) -> Self {
+        match e {
+            SearchConsoleError::Http(err) => transient_from_reqwest("searchconsole", err),
+            SearchConsoleError::Api { status, message } => {
+                google_api_error("searchconsole", status.as_u16(), message, None)
+            }
+            SearchConsoleError::Parse(err) => {
+                McpError::internal(format!("could not parse Search Console response: {err}"))
+                    .with_service("searchconsole")
             }
         }
     }

@@ -5,6 +5,31 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-09-14
+
+### Added
+
+- **Search Console domain (8 tools)**: `searchconsole_list_sites`,
+  `searchconsole_get_site`, `searchconsole_list_sitemaps`,
+  `searchconsole_get_sitemap`, `searchconsole_submit_sitemap`,
+  `searchconsole_delete_sitemap`, `searchconsole_query_analytics`,
+  `searchconsole_inspect_url`. Full surface is now **110 tools** across eight
+  domains.
+- `ENABLED_DOMAINS` accepts `searchconsole` (aliases `search_console`,
+  `search-console`, `webmasters`), which requests the
+  `https://www.googleapis.com/auth/webmasters` scope at consent time.
+
+### Notes
+
+- Requires the **Search Console API** to be enabled on the OAuth project.
+  Existing authorizations do not carry the new scope; users must
+  re-authorize at `/authorize` (or re-run `google-mcp auth`) before the
+  Search Console tools work.
+- `searchconsole_delete_sitemap` has no undo; resubmit the sitemap URL to add
+  it back.
+- Property spelling matters: a Domain property is `sc-domain:example.com`, a
+  URL-prefix property is `https://example.com/` with the trailing slash.
+
 ## [0.10.0] - 2026-08-31
 
 ### Added
@@ -149,4 +174,5 @@ behaves, not a list of shipped bugs:
 - **SQLite persistence** with AES-256-GCM encryption at rest, AAD-bound to the
   user's Google `sub`.
 
+[0.11.0]: https://github.com/matpb/google-mcp-rs/releases/tag/v0.11.0
 [0.8.0]: https://github.com/matpb/google-mcp-rs/releases/tag/v0.8.0

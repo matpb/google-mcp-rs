@@ -1385,3 +1385,83 @@ pub struct PeopleModifyContactGroupMembersParams {
     #[serde(default)]
     pub remove: Vec<String>,
 }
+
+// ===========================================================================
+// Search Console
+// ===========================================================================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchConsoleSiteUrlParams {
+    /// Property exactly as Search Console spells it: `sc-domain:example.com` for a Domain property, `https://example.com/` (with trailing slash) for a URL-prefix property. Copy it from `searchconsole_list_sites`.
+    pub site_url: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchConsoleListSitemapsParams {
+    /// Property exactly as Search Console spells it: `sc-domain:example.com` for a Domain property, `https://example.com/` (with trailing slash) for a URL-prefix property. Copy it from `searchconsole_list_sites`.
+    pub site_url: String,
+    /// Sitemap index URL. Set to list only the sitemaps referenced by that index.
+    #[serde(default)]
+    pub sitemap_index: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchConsoleSitemapParams {
+    /// Property exactly as Search Console spells it: `sc-domain:example.com` for a Domain property, `https://example.com/` (with trailing slash) for a URL-prefix property. Copy it from `searchconsole_list_sites`.
+    pub site_url: String,
+    /// Full sitemap URL, e.g. `https://example.com/sitemap.xml`.
+    pub feedpath: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchConsoleFilter {
+    /// One of `country`, `device`, `page`, `query`, `searchAppearance`.
+    pub dimension: String,
+    /// One of `equals` (default), `notEquals`, `contains`, `notContains`, `includingRegex`, `excludingRegex`.
+    #[serde(default)]
+    pub operator: Option<String>,
+    /// Value to match. Country is ISO 3166-1 alpha-3 (`CAN`), device is `DESKTOP`, `MOBILE` or `TABLET`, page is a full URL, query is the search string, regex operators take RE2 syntax.
+    pub expression: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchConsoleQueryParams {
+    /// Property exactly as Search Console spells it: `sc-domain:example.com` for a Domain property, `https://example.com/` (with trailing slash) for a URL-prefix property. Copy it from `searchconsole_list_sites`.
+    pub site_url: String,
+    /// Inclusive, `YYYY-MM-DD`, Pacific time.
+    pub start_date: String,
+    /// Inclusive, `YYYY-MM-DD`, Pacific time.
+    pub end_date: String,
+    /// Group rows by any of `country`, `device`, `page`, `query`, `searchAppearance`, `date`, `hour`. Order sets the order of `keys` in each row. Omit for one aggregate row.
+    #[serde(default)]
+    pub dimensions: Option<Vec<String>>,
+    /// One of `web` (default), `image`, `video`, `news`, `discover`, `googleNews`.
+    #[serde(default)]
+    pub search_type: Option<String>,
+    /// Row filters, all combined with AND.
+    #[serde(default)]
+    pub filters: Option<Vec<SearchConsoleFilter>>,
+    /// One of `auto` (default), `byPage`, `byProperty`, `byNewsShowcasePanel`.
+    #[serde(default)]
+    pub aggregation_type: Option<String>,
+    /// 1 to 25000, default 1000.
+    #[serde(default)]
+    pub row_limit: Option<u32>,
+    /// Zero-based offset for paging, default 0.
+    #[serde(default)]
+    pub start_row: Option<u32>,
+    /// `final` (default) returns only finalized days; `all` also includes fresh data that may still change; `hourly_all` is required when `hour` is a dimension.
+    #[serde(default)]
+    pub data_state: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchConsoleInspectUrlParams {
+    /// Property exactly as Search Console spells it: `sc-domain:example.com` for a Domain property, `https://example.com/` (with trailing slash) for a URL-prefix property. Copy it from `searchconsole_list_sites`.
+    pub site_url: String,
+    /// Full URL to inspect. Must belong to `site_url`.
+    pub inspection_url: String,
+    /// BCP-47 code for the result text, default `en-US`.
+    #[serde(default)]
+    pub language_code: Option<String>,
+}

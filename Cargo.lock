@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "google-mcp"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -608,6 +608,7 @@ dependencies = [
  "http",
  "jsonwebtoken",
  "mail-builder",
+ "percent-encoding",
  "rand 0.8.6",
  "reqwest",
  "rmcp",
