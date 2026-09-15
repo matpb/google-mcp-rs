@@ -218,8 +218,17 @@ pub async fn register(
     ))
 }
 
+// RFC 8252 section 7.1 endorses private-use URI schemes for native apps.
+const NATIVE_CLIENT_REDIRECT_PREFIXES: &[&str] = &["cursor://anysphere.cursor-mcp/"];
+
 fn is_valid_redirect_uri(uri: &str) -> bool {
     if uri.starts_with("https://") {
+        return true;
+    }
+    if NATIVE_CLIENT_REDIRECT_PREFIXES
+        .iter()
+        .any(|prefix| uri.starts_with(prefix))
+    {
         return true;
     }
     // Allow loopback for local development per RFC 8252.
@@ -700,5 +709,28 @@ mod tests {
         assert!(!is_valid_redirect_uri("http://example.com/cb"));
         assert!(!is_valid_redirect_uri("ftp://x"));
         assert!(!is_valid_redirect_uri("javascript:alert(1)"));
+        assert!(is_valid_redirect_uri(
+            "cursor://anysphere.cursor-mcp/oauth/callback"
+        ));
+        assert!(is_valid_redirect_uri(
+            "cursor://anysphere.cursor-mcp/other/path"
+        ));
+        assert!(!is_valid_redirect_uri(
+            "cursor://anysphere.cursor-mcp.evil.com/cb"
+        ));
+        assert!(!is_valid_redirect_uri("cursor://evil.example/cb"));
+        assert!(!is_valid_redirect_uri("cursor://"));
+        assert!(!is_valid_redirect_uri("myapp://anysphere.cursor-mcp/cb"));
+    }
+
+    #[test]
+    fn cursor_redirect_uri_accepts_query_params() {
+        let mut url = url::Url::parse("cursor://anysphere.cursor-mcp/oauth/callback").unwrap();
+        assert!(!url.cannot_be_a_base());
+        url.query_pairs_mut()
+            .append_pair("code", "abc123")
+            .append_pair("state", "xyz");
+        assert!(url.as_str().contains("code=abc123"));
+        assert!(url.as_str().contains("state=xyz"));
     }
 }
