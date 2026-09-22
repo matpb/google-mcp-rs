@@ -38,18 +38,25 @@ use oauth::proxy;
 use state::{AppState, Tenancy};
 use storage::{Db, accounts, codes::sweep_expired};
 
+const USAGE: &str = "usage: google-mcp [http|stdio|auth|version|help]";
+
 #[tokio::main]
 async fn main() {
     // Subcommand selects the transport / identity model:
     //   (default) http  — multi-tenant HTTP server (unchanged, OAuth 2.1)
-    //   stdio           — single-tenant MCP over stdin/stdout for Claude Desktop
+    //   stdio           — single-tenant MCP over stdin/stdout for local MCP clients
     //   auth            — one-time browser sign-in that stores the local account
+    //   version / help  — print version / usage and exit
     match std::env::args().nth(1).as_deref() {
         None | Some("http") => run_http().await,
         Some("stdio") => run_stdio().await,
         Some("auth") => run_auth().await,
+        Some("version") | Some("--version") | Some("-V") => {
+            println!("google-mcp {}", env!("CARGO_PKG_VERSION"));
+        }
+        Some("help") | Some("--help") | Some("-h") => println!("{USAGE}"),
         Some(other) => {
-            eprintln!("unknown subcommand `{other}`. usage: google-mcp [http|stdio|auth]");
+            eprintln!("unknown subcommand `{other}`. {USAGE}");
             std::process::exit(2);
         }
     }
@@ -90,16 +97,8 @@ async fn open_database(cfg: &ServerConfig) -> Db {
     }
 }
 
-/// Local (stdio) mode auto-provisions the two crypto secrets so the `.mcpb`
-/// bundle carries none. When `JWT_SECRET` / `STORAGE_ENCRYPTION_KEY` are absent
-/// from the environment, they are loaded from `<DATABASE_URL>.keys` — generated
-/// and persisted there on first run — and injected into the process env before
-/// the config is read.
-///
-/// Must be called **after** `dotenvy::dotenv()`. `dotenvy` never overwrites a
-/// variable that is already set, so anything injected here would otherwise win
-/// over a `.env` file and silently swap the key that decrypts an existing
-/// database.
+/// Loads `JWT_SECRET` / `STORAGE_ENCRYPTION_KEY` from `<DATABASE_URL>.keys` when unset, generating the file on first run.
+/// Must run after `dotenvy::dotenv()`: dotenvy never overwrites a set variable, so a `.env` key would otherwise silently win.
 fn ensure_local_secrets() -> Result<(), String> {
     let env_jwt = optional_env("JWT_SECRET");
     let env_key = optional_env("STORAGE_ENCRYPTION_KEY");
@@ -283,7 +282,7 @@ async fn run_http() {
 }
 
 // ---------------------------------------------------------------------------
-// stdio mode — single-tenant MCP over stdin/stdout (Claude Desktop / .mcpb).
+// stdio mode — single-tenant MCP over stdin/stdout (local MCP clients).
 // ---------------------------------------------------------------------------
 
 async fn run_stdio() {

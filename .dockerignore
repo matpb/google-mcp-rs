@@ -3,5 +3,3 @@ target
 .env
 *.db
 *.md
-mcpb/build
-*.mcpb

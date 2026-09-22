@@ -1,3 +1,0 @@
-# Build artifacts — the bundle is assembled from target/ binaries, never committed.
-build/
-*.mcpb

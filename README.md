@@ -2,9 +2,9 @@
 
 A multi-tenant **Model Context Protocol** server for **Google Workspace**, written in Rust. Built around streamable HTTP transport with full **OAuth 2.1** so it plugs straight into Claude.ai, Claude Code, ChatGPT custom connectors, Cursor, or any MCP client that speaks the 2025-11-25 authorization spec.
 
-It also runs in **single-tenant stdio mode**, packaged as a one-click **Claude Desktop extension** ([`.mcpb`](#quick-start--claude-desktop-extension-mcpb)) — no TLS certificate, no tunnel, no inbound network exposure.
+It also runs in **single-tenant stdio mode** as a prebuilt binary that any local MCP client (Claude Code, Claude Desktop, Codex, Cursor) launches as a child process — no TLS certificate, no tunnel, no inbound network exposure.
 
-> **Status:** v0.11.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **110 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. Claude Desktop bundles add a 111th tool, `google_authenticate`, for in-chat sign-in.
+> **Status:** v0.11.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **110 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 111th tool, `google_authenticate`, handles in-chat sign-in.
 
 ## Why
 
@@ -13,7 +13,7 @@ The first-party Google Workspace MCP server is missing fundamentals (you cannot 
 - **Full Gmail / Sheets / Drive / Docs / Calendar / Tasks / Contacts / Search Console surface** — 110 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence), Google Tasks (task lists + tasks CRUD, subtasks, reordering, completion, cross-list moves), Google Contacts (contact CRUD, prefix search, contact groups/labels and their membership), and Google Search Console (properties, sitemaps, search analytics, URL inspection).
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256.
-- **Two transports, one binary** — **streamable HTTP** (multi-tenant: one running instance serves many MCP clients and many Google accounts at once), or **stdio** (single-tenant: Claude Desktop launches it as a local child process, no TLS and nothing on the network). See [Quick start — Claude Desktop](#quick-start--claude-desktop-extension-mcpb).
+- **Two transports, one binary** — **streamable HTTP** (multi-tenant: one running instance serves many MCP clients and many Google accounts at once), or **stdio** (single-tenant: your MCP client launches it as a local child process, no TLS and nothing on the network). See [Quick start — prebuilt binary (stdio)](#quick-start--prebuilt-binary-stdio).
 - **One binary, distroless image** — small surface, no runtime dependencies.
 
 ## Architecture overview
@@ -60,36 +60,62 @@ Public-internet deployment is *possible* — the OAuth flow, crypto (AES-256-GCM
 
 If those gaps don't fit your threat model, fork it. The architecture is set up to make those additions straightforward, and PRs are welcome.
 
-## Quick start — Claude Desktop extension (`.mcpb`)
+## Quick start — prebuilt binary (stdio)
 
-The fastest way to run this. Claude Desktop launches the binary locally over stdio, so there is **no TLS certificate, no tunnel, and no inbound network exposure**. Works on macOS, Windows, and Linux. (During sign-in only, a short-lived listener on `127.0.0.1:8433` catches Google's redirect; it is closed as soon as the flow finishes or times out.)
+This path is for a personal install on your own machine; see [Quick start — HTTP server](#quick-start--http-server-local-development) below for shared deployments. (During sign-in only, a short-lived listener on `127.0.0.1:8433` catches Google's redirect; it is closed as soon as the flow finishes or times out.)
 
-1. **Download** the latest `google-workspace-mcp.mcpb` from [Releases](https://github.com/matpb/google-mcp-rs/releases).
+1. **Download** the binary for your platform from [Releases](https://github.com/matpb/google-mcp-rs/releases/latest):
+
+   | Asset | Platform |
+   |---|---|
+   | `google-mcp-linux-x86_64` | Linux x86_64 |
+   | `google-mcp-linux-aarch64` | Linux aarch64 |
+   | `google-mcp-macos-universal` | macOS (Intel and Apple Silicon) |
+   | `google-mcp-windows-x86_64.exe` | Windows x86_64 |
+   | `SHA256SUMS.txt` | checksums for all of the above |
+
+   ```bash
+   ASSET=google-mcp-linux-x86_64   # or linux-aarch64 / macos-universal
+   curl -fsSLO "https://github.com/matpb/google-mcp-rs/releases/latest/download/$ASSET"
+   curl -fsSLO "https://github.com/matpb/google-mcp-rs/releases/latest/download/SHA256SUMS.txt"
+   grep " $ASSET\$" SHA256SUMS.txt | sha256sum -c -   # shasum -a 256 -c on macOS
+   chmod +x "$ASSET" && mkdir -p ~/.local/bin && mv "$ASSET" ~/.local/bin/google-mcp
+   google-mcp --version
+   ```
+
+   A binary fetched with `curl` carries no macOS quarantine flag, so it runs without a Gatekeeper prompt; a browser download would need `xattr -d com.apple.quarantine`.
+
 2. **Create your own Google OAuth client** — follow [step 1 below](#1-create-a-google-oauth-client), and register exactly this redirect URI:
    ```
    http://localhost:8433/oauth/google/callback
    ```
    (Google rejects the sign-in with `redirect_uri_mismatch` if this is missing.)
-3. **Double-click the `.mcpb`.** Claude Desktop opens an install dialog asking for your **Google Client ID** and **Client Secret** — paste them in and install.
-4. In any chat, ask Claude to run the **`google_authenticate`** tool. A browser opens, you approve access, and that is it. You only do this once.
 
-That is the entire configuration. `JWT_SECRET` and `STORAGE_ENCRYPTION_KEY` are generated automatically on first run and stored beside the database at mode `0600` — **the bundle ships no secrets**. Your encrypted Google refresh token lives only on your machine (`~/.google-mcp.db`).
+3. **Configure** — set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `BASE_URL=http://localhost:8433`, `DATABASE_URL=~/.google-mcp.db`. `JWT_SECRET` and `STORAGE_ENCRYPTION_KEY` are generated on first run and stored at `<DATABASE_URL>.keys`, mode `0600` — no hand-managed secrets.
 
-<details>
-<summary><b>Platform notes (unsigned binaries)</b></summary>
+   Claude Code:
+   ```bash
+   claude mcp add --scope user google-workspace \
+     -e GOOGLE_CLIENT_ID=... -e GOOGLE_CLIENT_SECRET=... \
+     -e BASE_URL=http://localhost:8433 -e DATABASE_URL="$HOME/.google-mcp.db" \
+     -- "$HOME/.local/bin/google-mcp" stdio
+   ```
 
-The release binaries are **not code-signed or notarized yet**, so the OS may object the first time:
+   Codex / ChatGPT desktop (`~/.codex/config.toml`):
+   ```toml
+   [mcp_servers.google_workspace]
+   command = "/home/you/.local/bin/google-mcp"
+   args = ["stdio"]
+   [mcp_servers.google_workspace.env]
+   GOOGLE_CLIENT_ID = "..."
+   GOOGLE_CLIENT_SECRET = "..."
+   BASE_URL = "http://localhost:8433"
+   DATABASE_URL = "/home/you/.google-mcp.db"
+   ```
 
-- **macOS** — if Claude Desktop cannot launch the server, clear the download quarantine once:
-  ```bash
-  xattr -dr com.apple.quarantine ~/Library/Application\ Support/Claude/Claude\ Extensions/
-  ```
-- **Windows** — SmartScreen may warn on first run: **More info → Run anyway**.
-- **Port 8433** must be free while you sign in (it is only used for the OAuth callback). If something else owns it, sign-in fails with a clear message.
+4. **Sign in once** — run `google-mcp auth` in a terminal with the same env vars, or ask the assistant to call the **`google_authenticate`** tool. A browser opens, you approve, and that is it. Port 8433 must be free during sign-in only.
 
-</details>
-
-To build the bundle yourself, or to scope the tool surface down, see [`mcpb/README.md`](mcpb/README.md).
+Your encrypted Google refresh token lives only on your machine (`~/.google-mcp.db`, the `DATABASE_URL` SQLite file). The macOS binary is signed and notarized with a Developer ID; the Linux binaries are fully static (musl) and run on any distribution; the Windows binary is unsigned, so SmartScreen may warn on first run: **More info → Run anyway**.
 
 ## Quick start — HTTP server (local development)
 
@@ -450,6 +476,10 @@ Every error returned by the server includes a structured `data` payload alongsid
 - **Forms, People (Contacts), Tasks** — the rest of the Workspace surface.
 - **Resumable Drive uploads** for files larger than ~5 MB.
 - **Hardening:** ID token JWKS verification, refresh token rotation, structured per-account audit log.
+
+## Releasing
+
+Releases are built locally, not in CI: bump `version` in `Cargo.toml`, add the matching `## [x.y.z]` section to `CHANGELOG.md`, commit, then run `scripts/release.sh` (`--check` for preflight only, `--dry-run` to build everything without tagging or publishing). It cross-builds static Linux x86_64/aarch64 binaries with `cargo-zigbuild`, the Windows binary with `cargo-xwin`, builds, signs and notarizes the universal macOS binary over SSH on a Mac, smoke-tests each with `--version`, writes `SHA256SUMS.txt`, then tags, pushes and publishes the GitHub release with notes taken from the changelog.
 
 ## Contributing
 

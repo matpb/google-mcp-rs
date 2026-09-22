@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `search-console`, `webmasters`), which requests the
   `https://www.googleapis.com/auth/webmasters` scope at consent time.
 
+### Removed
+
+- The Claude Desktop `.mcpb` bundle and the `mcpb/` packaging directory. Claude
+  Desktop now runs local MCP servers directly, so the release ships bare
+  binaries only: `google-mcp-linux-x86_64`, `google-mcp-linux-aarch64` (new),
+  `google-mcp-macos-universal`, `google-mcp-windows-x86_64.exe`, plus
+  `SHA256SUMS.txt` (new). `google-mcp --version` (new) prints the version for
+  install-time smoke tests.
+- Releases are now built and published locally by `scripts/release.sh` instead
+  of GitHub Actions. Linux binaries are static (musl); the macOS binary is
+  signed and notarized.
+
 ### Notes
 
 - Requires the **Search Console API** to be enabled on the OAuth project.
