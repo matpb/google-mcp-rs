@@ -1,5 +1,5 @@
 # rust:1.94-alpine
-FROM rust@sha256:77237dd363a0b127bb5ef532c2d64c0deb380b738e43a9c4bdac73398d6d0a08 AS builder
+FROM rust@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 AS builder
 WORKDIR /build
 RUN apk upgrade --no-cache && apk add --no-cache musl-dev
 
