@@ -19,7 +19,7 @@ RUN touch src/main.rs && \
     mkdir /data
 
 # gcr.io/distroless/cc-debian12:nonroot
-FROM gcr.io/distroless/cc-debian12@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
+FROM gcr.io/distroless/cc-debian12@sha256:e5d81ddde149641e2a9ba55be4545bc125c67de07508b03ba4c22e6eb0ded5aa
 LABEL org.opencontainers.image.source="https://github.com/matpb/google-mcp-rs" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.description="Multi-tenant Rust MCP server for Google Workspace"
