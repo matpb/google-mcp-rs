@@ -9,7 +9,8 @@ use rmcp::{ErrorData, tool, tool_router};
 use serde_json::{Value, json};
 
 use crate::errors::{McpError, to_mcp};
-use crate::google::sheets::{SheetsClient, SheetsError};
+use crate::google::sheets::SheetsClient;
+use crate::mcp::common;
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
 
@@ -24,8 +25,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SheetsCreateParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.sheets_for(&parts).await?;
         let mut props = json!({"title": p.title});
         if let Some(l) = p.locale {
             props["locale"] = json!(l);
@@ -58,8 +58,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SheetsGetParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.sheets_for(&parts).await?;
         client
             .get(
                 &p.spreadsheet_id,
@@ -81,8 +80,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SheetsGetValuesParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.sheets_for(&parts).await?;
         client
             .get_values(
                 &p.spreadsheet_id,
@@ -105,8 +103,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SheetsBatchGetValuesParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.sheets_for(&parts).await?;
         client
             .batch_get_values(
                 &p.spreadsheet_id,
@@ -129,8 +126,7 @@ impl GoogleMcp {
         Parameters(p): Parameters<SheetsUpdateValuesParams>,
     ) -> Result<String, ErrorData> {
         ensure_2d_values(&p.values, "values")?;
-        let session = self.resolve_session(&parts).await?;
-        let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.sheets_for(&parts).await?;
         let opt = p.value_input_option.as_deref().unwrap_or("RAW");
         let sid = p.spreadsheet_id.clone();
         client
@@ -143,7 +139,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_sheets_not_found(e, &sid))
+            .map_err(|e| common::reclassify_not_found(e, "spreadsheet", &sid, "sheets"))
     }
 
     #[tool(
@@ -156,8 +152,7 @@ impl GoogleMcp {
         Parameters(p): Parameters<SheetsAppendValuesParams>,
     ) -> Result<String, ErrorData> {
         ensure_2d_values(&p.values, "values")?;
-        let session = self.resolve_session(&parts).await?;
-        let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.sheets_for(&parts).await?;
         let opt = p.value_input_option.as_deref().unwrap_or("RAW");
         let sid = p.spreadsheet_id.clone();
         client
@@ -170,7 +165,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_sheets_not_found(e, &sid))
+            .map_err(|e| common::reclassify_not_found(e, "spreadsheet", &sid, "sheets"))
     }
 
     #[tool(
@@ -182,8 +177,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SheetsClearValuesParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.sheets_for(&parts).await?;
         client
             .clear_values(&p.spreadsheet_id, &p.range)
             .await
@@ -200,8 +194,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SheetsBatchUpdateValuesParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.sheets_for(&parts).await?;
         client
             .batch_update_values(&p.spreadsheet_id, &p.body)
             .await
@@ -218,8 +211,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SheetsBatchUpdateParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.sheets_for(&parts).await?;
         client
             .batch_update(&p.spreadsheet_id, &p.body)
             .await
@@ -236,8 +228,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SheetsAddSheetParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.sheets_for(&parts).await?;
         let mut props = json!({"title": p.title});
         if p.row_count.is_some() || p.column_count.is_some() {
             let mut grid = json!({});
@@ -271,8 +262,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SheetsDeleteSheetParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = SheetsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.sheets_for(&parts).await?;
         let body = json!({
             "requests": [{
                 "deleteSheet": {"sheetId": p.sheet_id}
@@ -286,15 +276,14 @@ impl GoogleMcp {
     }
 }
 
-/// Re-classify a Sheets 404 into a typed `NotFound` with the spreadsheet
-/// kind set so agents target their discovery correctly.
-fn reclassify_sheets_not_found(e: SheetsError, spreadsheet_id: &str) -> ErrorData {
-    if let SheetsError::Api { status, .. } = &e
-        && status.as_u16() == 404
-    {
-        return McpError::not_found("spreadsheet", spreadsheet_id, "sheets").into();
+impl GoogleMcp {
+    pub(crate) async fn sheets_for(&self, parts: &Parts) -> Result<SheetsClient, ErrorData> {
+        let session = self.resolve_session(parts).await?;
+        Ok(SheetsClient::new(
+            (*self.state.http).clone(),
+            session.access_token,
+        ))
     }
-    to_mcp(e)
 }
 
 /// Validate that `values` is a 2-D JSON array. Sheets returns a confusing
@@ -319,4 +308,27 @@ fn ensure_2d_values(v: &Value, field: &str) -> Result<(), ErrorData> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_2d_values_rejects_non_array_top_level() {
+        let v = json!("not-an-array");
+        assert!(ensure_2d_values(&v, "values").is_err());
+    }
+
+    #[test]
+    fn ensure_2d_values_rejects_non_array_row() {
+        let v = json!([["a", "b"], "not-a-row"]);
+        assert!(ensure_2d_values(&v, "values").is_err());
+    }
+
+    #[test]
+    fn ensure_2d_values_accepts_valid_2d_array() {
+        let v = json!([["a", "b"], ["c", "d"]]);
+        assert!(ensure_2d_values(&v, "values").is_ok());
+    }
 }

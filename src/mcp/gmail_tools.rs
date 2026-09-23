@@ -12,9 +12,10 @@ use crate::errors::{McpError, to_mcp};
 use crate::files::FileJail;
 use crate::google::drive::DriveClient;
 use crate::google::gmail::{
-    CreateFilter, CreateLabel, FilterAction, FilterCriteria, GmailClient, GmailError, LabelColor,
-    ModifyLabels, UpdateLabel,
+    CreateFilter, CreateLabel, FilterAction, FilterCriteria, GmailClient, LabelColor, ModifyLabels,
+    UpdateLabel,
 };
+use crate::mcp::common;
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
 use crate::mime::{AttachmentInput, AttachmentSource, Compose, ReplyContext, ResolvedAttachment};
@@ -187,6 +188,8 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<GmailDownloadAttachmentParams>,
     ) -> Result<String, ErrorData> {
+        validate_download_destinations(p.dest_path.as_deref(), p.to_drive_folder_id.as_deref())?;
+
         let session = self.resolve_session(&parts).await?;
         let client = GmailClient::new((*self.state.http).clone(), &session.access_token);
         let jail = self.state.config.file_jail.as_ref();
@@ -196,10 +199,15 @@ impl GoogleMcp {
         let raw = client
             .get_attachment(&p.message_id, &p.attachment_id)
             .await
-            .map_err(|e| reclassify_not_found(e, "attachment", &p.attachment_id))?;
+            .map_err(|e| {
+                common::reclassify_not_found(e, "attachment", &p.attachment_id, "gmail")
+            })?;
 
         if p.dest_path.is_none() && p.to_drive_folder_id.is_none() {
-            let size = raw.get("size").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let size = raw
+                .get("size")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
             if jail.is_some() && size > crate::files::INLINE_MAX_BYTES {
                 return Err(McpError::invalid_input(format!(
                     "attachment is {size} bytes — too large to return inline as base64"
@@ -556,7 +564,7 @@ impl GoogleMcp {
         let v = client
             .delete_filter(&p.id)
             .await
-            .map_err(|e| reclassify_not_found(e, "filter", &p.id))?;
+            .map_err(|e| common::reclassify_not_found(e, "filter", &p.id, "gmail"))?;
         Ok(v.to_string())
     }
 
@@ -589,7 +597,7 @@ impl GoogleMcp {
             LabelTarget::Message => client.modify_message(&p.id, &body).await,
             LabelTarget::Thread => client.modify_thread(&p.id, &body).await,
         }
-        .map_err(|e| reclassify_not_found(e, p.target.as_kind(), &p.id))?;
+        .map_err(|e| common::reclassify_not_found(e, p.target.as_kind(), &p.id, "gmail"))?;
         Ok(v.to_string())
     }
 
@@ -821,7 +829,7 @@ async fn build_outgoing_message(
                 ],
             )
             .await
-            .map_err(|e| reclassify_not_found(e, "message", reply_id))?;
+            .map_err(|e| common::reclassify_not_found(e, "message", reply_id, "gmail"))?;
 
         if thread_id.is_none()
             && let Some(tid) = metadata.get("threadId").and_then(|v| v.as_str())
@@ -899,7 +907,7 @@ async fn build_outgoing_message(
 }
 
 /// Resolve one attachment's bytes from its (single) source. Local paths go
-/// through the FILE_ROOT jail; Drive files are fetched server-side; base64 is
+/// through the `FILE_ROOT` jail; Drive files are fetched server-side; base64 is
 /// the remote-client fallback. None of these route file bytes through the
 /// model's context except the caller-supplied base64.
 async fn resolve_attachment(
@@ -952,14 +960,28 @@ async fn resolve_attachment(
             let (ct, bytes) = drive
                 .download_file(file_id)
                 .await
-                .map_err(|e| reclassify_drive_attachment(e, file_id))?;
+                .map_err(|e| common::reclassify_not_found(e, "file", file_id, "drive"))?;
             let mime_type = mime_type.or(Some(ct));
             ResolvedAttachment::from_bytes(filename, mime_type, bytes).map_err(to_mcp)
         }
     }
 }
 
-/// Error for when a tool needs FILE_ROOT but the operator hasn't enabled it.
+/// Error for when a tool needs `FILE_ROOT` but the operator hasn't enabled it.
+/// `dest_path` and `to_drive_folder_id` are alternate destinations, never both.
+fn validate_download_destinations(
+    dest_path: Option<&str>,
+    to_drive_folder_id: Option<&str>,
+) -> Result<(), ErrorData> {
+    if dest_path.is_some() && to_drive_folder_id.is_some() {
+        return Err(McpError::invalid_input(
+            "`dest_path` and `to_drive_folder_id` are mutually exclusive: pick one destination",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn file_exchange_disabled() -> ErrorData {
     McpError::invalid_input(
         "this server has no file-exchange directory configured (FILE_ROOT unset), so `path` \
@@ -974,16 +996,6 @@ fn file_exchange_disabled() -> ErrorData {
 
 /// Reclassify a Drive error hit while pulling attachment bytes so a bad
 /// `drive_file_id` reports as a not-found file, not an opaque 500.
-fn reclassify_drive_attachment(e: crate::google::drive::DriveError, id: &str) -> ErrorData {
-    use crate::google::drive::DriveError;
-    if let DriveError::Api { status, .. } = &e
-        && status.as_u16() == 404
-    {
-        return McpError::not_found("file", id, "drive").into();
-    }
-    to_mcp(e)
-}
-
 /// Check the total attachment payload up front so we can return a clear
 /// error before we waste time encoding base64 and hitting Gmail.
 fn attachments_total_size_check(attachments: &[ResolvedAttachment]) -> Result<(), ErrorData> {
@@ -1003,15 +1015,6 @@ fn attachments_total_size_check(attachments: &[ResolvedAttachment]) -> Result<()
 
 /// Re-classify a Gmail 404 into a typed `NotFound` with the resource kind
 /// and ID set so agents know which input to fix.
-fn reclassify_not_found(e: GmailError, kind: &'static str, id: &str) -> ErrorData {
-    if let GmailError::Api { status, .. } = &e
-        && status.as_u16() == 404
-    {
-        return McpError::not_found(kind, id, "gmail").into();
-    }
-    to_mcp(e)
-}
-
 impl LabelTarget {
     fn as_kind(self) -> &'static str {
         match self {
@@ -1113,8 +1116,24 @@ fn build_filter(p: GmailCreateFilterParams) -> Result<CreateFilter, ErrorData> {
     })
 }
 
-#[allow(dead_code)]
-fn _gmail_error_marker(_: GmailError) {} // silence unused-import warning if any
+#[cfg(test)]
+mod download_attachment_tests {
+    use super::*;
+
+    #[test]
+    fn both_destinations_set_is_rejected() {
+        let err = validate_download_destinations(Some("out.txt"), Some("root")).unwrap_err();
+        let data = err.data.unwrap();
+        assert_eq!(data.get("category").unwrap(), "invalid_input");
+    }
+
+    #[test]
+    fn single_or_no_destination_is_accepted() {
+        assert!(validate_download_destinations(Some("out.txt"), None).is_ok());
+        assert!(validate_download_destinations(None, Some("root")).is_ok());
+        assert!(validate_download_destinations(None, None).is_ok());
+    }
+}
 
 #[cfg(test)]
 mod filter_tests {

@@ -16,10 +16,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-/// Above this many raw bytes, returning a download inline as base64 would
-/// bloat the model's context. When a FILE_ROOT jail is available (so the
-/// caller has a `dest_path` alternative), downloads larger than this are
-/// refused inline and the caller is nudged toward writing to disk.
+/// Above this size, inline base64 is refused when a `dest_path` alternative exists.
 pub const INLINE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -67,11 +64,9 @@ impl FileMaintenance {
     /// `full`/`cleanup`/`all`/`true` → Full.
     pub fn parse(s: Option<&str>) -> Result<Self, String> {
         match s.map(|x| x.trim().to_ascii_lowercase()).as_deref() {
-            None | Some("") | Some("off") | Some("none") | Some("false") | Some("0") => {
-                Ok(Self::Off)
-            }
-            Some("info") | Some("readonly") | Some("read-only") => Ok(Self::Info),
-            Some("full") | Some("cleanup") | Some("all") | Some("true") => Ok(Self::Full),
+            None | Some("" | "off" | "none" | "false" | "0") => Ok(Self::Off),
+            Some("info" | "readonly" | "read-only") => Ok(Self::Info),
+            Some("full" | "cleanup" | "all" | "true") => Ok(Self::Full),
             Some(other) => Err(format!(
                 "invalid value `{other}` (expected one of: off, info, full)"
             )),
@@ -125,7 +120,6 @@ impl FileJail {
     }
 
     /// The canonical root, for surfacing in errors / diagnostics.
-    #[allow(dead_code)] // used in tests + kept as a diagnostic accessor
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -190,20 +184,27 @@ impl FileJail {
             ),
         })?;
         let parent = lexical.parent().unwrap_or(&self.root);
-        std::fs::create_dir_all(parent).map_err(|e| FileError::Io {
-            path: parent.display().to_string(),
+        let escape = || FileError::Escape {
+            path: input.to_string(),
+            root: self.root.display().to_string(),
+        };
+        let io_err = |p: &Path, e: std::io::Error| FileError::Io {
+            path: p.display().to_string(),
             source: e,
-        })?;
-        // Canonicalize the now-existing parent to defeat symlink escapes.
-        let canon_parent = std::fs::canonicalize(parent).map_err(|e| FileError::Io {
-            path: parent.display().to_string(),
-            source: e,
-        })?;
-        if !canon_parent.starts_with(&self.root) {
-            return Err(FileError::Escape {
-                path: input.to_string(),
-                root: self.root.display().to_string(),
-            });
+        };
+        // Create one level at a time, re-checking containment after each, so a
+        // symlinked intermediate dir can't make us create dirs outside the root.
+        let rel = parent.strip_prefix(&self.root).map_err(|_| escape())?;
+        let mut canon_parent = self.root.clone();
+        for comp in rel.components() {
+            let next = canon_parent.join(comp.as_os_str());
+            if std::fs::symlink_metadata(&next).is_err() {
+                std::fs::create_dir(&next).map_err(|e| io_err(&next, e))?;
+            }
+            canon_parent = std::fs::canonicalize(&next).map_err(|e| io_err(&next, e))?;
+            if !canon_parent.starts_with(&self.root) {
+                return Err(escape());
+            }
         }
         Ok(canon_parent.join(file_name))
     }
@@ -217,13 +218,53 @@ impl FileJail {
         })
     }
 
-    /// Write bytes to a jailed path, returning the absolute path written.
+    /// Writes an `O_EXCL` temp file then renames over the target, so a
+    /// symlink at the target name is never followed or written through.
     pub fn write(&self, input: &str, bytes: &[u8]) -> Result<PathBuf, FileError> {
         let path = self.resolve_write(input)?;
-        std::fs::write(&path, bytes).map_err(|e| FileError::Io {
-            path: path.display().to_string(),
-            source: e,
-        })?;
+        if let Ok(meta) = std::fs::symlink_metadata(&path) {
+            if meta.file_type().is_symlink() {
+                return Err(FileError::Escape {
+                    path: input.to_string(),
+                    root: self.root.display().to_string(),
+                });
+            }
+            if meta.is_dir() {
+                return Err(FileError::NotAFile(input.to_string()));
+            }
+        }
+        let dir = path.parent().unwrap_or(&self.root);
+        let tmp_path = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+        let write_result = (|| -> Result<(), FileError> {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)
+                .map_err(|e| FileError::Io {
+                    path: tmp_path.display().to_string(),
+                    source: e,
+                })?;
+            use std::io::Write;
+            f.write_all(bytes).map_err(|e| FileError::Io {
+                path: tmp_path.display().to_string(),
+                source: e,
+            })?;
+            f.sync_all().map_err(|e| FileError::Io {
+                path: tmp_path.display().to_string(),
+                source: e,
+            })
+        })();
+        if let Err(e) = write_result {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, &path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(FileError::Io {
+                path: path.display().to_string(),
+                source: e,
+            });
+        }
         Ok(path)
     }
 
@@ -268,7 +309,7 @@ impl FileJail {
                 ),
             });
         }
-        let size = std::fs::metadata(&canon).map(|m| m.len()).unwrap_or(0);
+        let size = std::fs::metadata(&canon).map_or(0, |m| m.len());
         std::fs::remove_file(&canon).map_err(|e| FileError::Io {
             path: canon.display().to_string(),
             source: e,
@@ -290,8 +331,7 @@ fn is_in_keep(root: &Path, path: &Path) -> bool {
     path.strip_prefix(root)
         .ok()
         .and_then(|rel| rel.components().next())
-        .map(|c| c.as_os_str() == "keep")
-        .unwrap_or(false)
+        .is_some_and(|c| c.as_os_str() == "keep")
 }
 
 fn scan_entries(root: &Path, rd: std::fs::ReadDir, out: &mut Vec<DirEntryInfo>) {
@@ -332,15 +372,12 @@ pub fn plan_delete<'a>(
     older_than_secs: Option<u64>,
     name_contains: Option<&str>,
 ) -> Vec<&'a DirEntryInfo> {
-    let needle = name_contains.map(|s| s.to_ascii_lowercase());
+    let needle = name_contains.map(str::to_ascii_lowercase);
     entries
         .iter()
         .filter(|e| {
             if let Some(min_age) = older_than_secs {
-                let age = now
-                    .duration_since(e.modified)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let age = now.duration_since(e.modified).map_or(0, |d| d.as_secs());
                 if age < min_age {
                     return false;
                 }
@@ -534,6 +571,125 @@ mod tests {
         assert!(matches!(err, FileError::Escape { .. }));
         // The file must not have been created outside the root.
         assert!(!root.parent().unwrap().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn write_leaves_no_temp_file_behind() {
+        let root = tmp_root();
+        let jail = jail_at(&root);
+        jail.write("report.pdf", b"%PDF-1.7").unwrap();
+        let names: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["report.pdf".to_string()]);
+    }
+
+    #[test]
+    fn write_overwrites_existing_regular_file() {
+        let root = tmp_root();
+        let jail = jail_at(&root);
+        jail.write("report.pdf", b"old").unwrap();
+        jail.write("report.pdf", b"new").unwrap();
+        assert_eq!(std::fs::read(root.join("report.pdf")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn write_target_that_is_a_directory_rejected() {
+        let root = tmp_root();
+        std::fs::create_dir(root.join("report.pdf")).unwrap();
+        let jail = jail_at(&root);
+        assert!(matches!(
+            jail.write("report.pdf", b"x").unwrap_err(),
+            FileError::NotAFile(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_through_symlinked_target_rejected_and_outside_file_unchanged() {
+        use std::os::unix::fs::symlink;
+        let root = tmp_root();
+        let outside = root.parent().unwrap().join(format!(
+            "sym-target-{}-{}.txt",
+            std::process::id(),
+            root.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::write(&outside, b"original").unwrap();
+        symlink(&outside, root.join("report.pdf")).unwrap();
+        let jail = jail_at(&root);
+        let err = jail.write("report.pdf", b"attacker bytes").unwrap_err();
+        assert!(matches!(err, FileError::Escape { .. }));
+        assert_eq!(std::fs::read(&outside).unwrap(), b"original");
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_through_symlinked_parent_dir_rejected() {
+        use std::os::unix::fs::symlink;
+        let root = tmp_root();
+        let outside_dir = root.parent().unwrap().join(format!(
+            "sym-parent-{}-{}",
+            std::process::id(),
+            root.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        symlink(&outside_dir, root.join("linked")).unwrap();
+        let jail = jail_at(&root);
+        let err = jail
+            .write("linked/report.pdf", b"attacker bytes")
+            .unwrap_err();
+        assert!(matches!(err, FileError::Escape { .. }));
+        assert!(!outside_dir.join("report.pdf").exists());
+        let _ = std::fs::remove_dir_all(&outside_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_never_creates_dirs_outside_root_through_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+        let root = tmp_root();
+        let outside_dir = root.parent().unwrap().join(format!(
+            "sym-mkdir-{}-{}",
+            std::process::id(),
+            root.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        symlink(&outside_dir, root.join("linked")).unwrap();
+        let jail = jail_at(&root);
+        let err = jail.write("linked/newdir/report.pdf", b"x").unwrap_err();
+        assert!(matches!(err, FileError::Escape { .. }));
+        assert!(!outside_dir.join("newdir").exists());
+        let _ = std::fs::remove_dir_all(&outside_dir);
+    }
+
+    #[test]
+    fn write_creates_nested_dirs_inside_root() {
+        let root = tmp_root();
+        let jail = jail_at(&root);
+        jail.write("a/b/c/report.pdf", b"x").unwrap();
+        assert_eq!(std::fs::read(root.join("a/b/c/report.pdf")).unwrap(), b"x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_file_of_symlink_does_not_delete_outside_target() {
+        use std::os::unix::fs::symlink;
+        let root = tmp_root();
+        let outside = root.parent().unwrap().join(format!(
+            "sym-rm-target-{}-{}.txt",
+            std::process::id(),
+            root.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::write(&outside, b"keep me").unwrap();
+        let link = root.join("report.pdf");
+        symlink(&outside, &link).unwrap();
+        let jail = jail_at(&root);
+        assert!(jail.remove_file(&link).is_err());
+        assert!(outside.exists());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep me");
+        let _ = std::fs::remove_file(&outside);
     }
 
     #[test]

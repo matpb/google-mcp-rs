@@ -10,8 +10,11 @@ use reqwest::Method;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use super::http::{
+    InvalidPathSegment, MAX_API_RESPONSE_BYTES, ReadBodyError, read_body_capped, seg,
+};
+
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum DocsError {
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
@@ -19,6 +22,25 @@ pub enum DocsError {
     Api { status: StatusCode, message: String },
     #[error("could not parse Docs response: {0}")]
     Parse(serde_json::Error),
+    #[error("invalid id: {0}")]
+    InvalidId(String),
+    #[error("response body exceeds the {cap}-byte cap (at least {actual} bytes)")]
+    TooLarge { cap: usize, actual: usize },
+}
+
+impl From<InvalidPathSegment> for DocsError {
+    fn from(e: InvalidPathSegment) -> Self {
+        DocsError::InvalidId(e.0)
+    }
+}
+
+impl From<ReadBodyError> for DocsError {
+    fn from(e: ReadBodyError) -> Self {
+        match e {
+            ReadBodyError::Http(e) => DocsError::Http(e),
+            ReadBodyError::TooLarge { cap, actual } => DocsError::TooLarge { cap, actual },
+        }
+    }
 }
 
 const BASE: &str = "https://docs.googleapis.com/v1/documents";
@@ -54,6 +76,7 @@ impl DocsClient {
         document_id: &str,
         suggestions_view_mode: Option<&str>,
     ) -> Result<Value, DocsError> {
+        let document_id = seg(document_id)?;
         let mut q: Vec<(String, String)> = vec![];
         if let Some(s) = suggestions_view_mode {
             q.push(("suggestionsViewMode".into(), s.into()));
@@ -67,12 +90,9 @@ impl DocsClient {
         .await
     }
 
-    /// Schema-level batch update: insertText, deleteContentRange,
-    /// replaceAllText, updateTextStyle, updateParagraphStyle,
-    /// createNamedRange, insertTable, etc. Body:
-    /// `{"requests":[{...}],"writeControl":{"requiredRevisionId":"..."}?}`.
-    /// See https://developers.google.com/docs/api/reference/rest/v1/documents/request
+    /// Schema-level batch update; see the `documents/request` REST reference.
     pub async fn batch_update(&self, document_id: &str, body: &Value) -> Result<Value, DocsError> {
+        let document_id = seg(document_id)?;
         self.request(
             Method::POST,
             format!("{BASE}/{document_id}:batchUpdate"),
@@ -105,16 +125,16 @@ impl DocsClient {
         }
         let resp = req.send().await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         if status.is_success() {
-            if text.is_empty() {
+            if bytes.is_empty() {
                 return Ok(serde_json::json!({}));
             }
-            return serde_json::from_str(&text).map_err(DocsError::Parse);
+            return serde_json::from_slice(&bytes).map_err(DocsError::Parse);
         }
         Err(DocsError::Api {
             status,
-            message: text.chars().take(800).collect(),
+            message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
         })
     }
 }
@@ -145,7 +165,9 @@ pub fn end_of_body(doc: &Value) -> Option<u32> {
 /// float in [0, 1]. Returns `None` for malformed input.
 pub fn hex_to_rgb(hex: &str) -> Option<Value> {
     let h = hex.trim().trim_start_matches('#');
-    if h.len() != 6 {
+    // Byte-slicing needs ASCII: a non-ASCII char could split a multi-byte
+    // UTF-8 sequence and panic even when `h.len() == 6` in bytes.
+    if h.len() != 6 || !h.is_ascii() {
         return None;
     }
     let r = u8::from_str_radix(&h[0..2], 16).ok()? as f64 / 255.0;
@@ -237,7 +259,7 @@ pub fn text_style_request(start: u32, end: u32, style: &TextStyleSpec) -> Option
 }
 
 /// Build an `updateParagraphStyle` request that sets `namedStyleType`
-/// (NORMAL_TEXT, TITLE, SUBTITLE, HEADING_1…6) over the range.
+/// (`NORMAL_TEXT`, TITLE, SUBTITLE, `HEADING_1…6`) over the range.
 pub fn paragraph_style_request(start: u32, end: u32, named_style_type: &str) -> Value {
     json!({
         "updateParagraphStyle": {
@@ -272,7 +294,10 @@ fn find_in_elements(
         {
             for pe in pe_list {
                 if let Some(tr) = pe.get("textRun") {
-                    let start = pe.get("startIndex").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let start = pe
+                        .get("startIndex")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as u32;
                     let content = tr.get("content").and_then(|v| v.as_str()).unwrap_or("");
                     find_in_run(content, start, needle, case_sensitive, out);
                 }
@@ -565,6 +590,12 @@ mod tests {
         assert!(hex_to_rgb("#abc").is_none()); // 3-char shorthand not accepted
         assert!(hex_to_rgb("").is_none());
         assert!(hex_to_rgb("#xxxxxx").is_none());
+    }
+
+    #[test]
+    fn hex_to_rgb_rejects_non_ascii_without_panicking() {
+        assert!(hex_to_rgb("€12345").is_none());
+        assert!(hex_to_rgb("#日本語です").is_none());
     }
 
     #[test]

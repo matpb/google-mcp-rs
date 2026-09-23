@@ -7,8 +7,11 @@ use reqwest::Method;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::http::{
+    InvalidPathSegment, MAX_API_RESPONSE_BYTES, ReadBodyError, read_body_capped, seg,
+};
+
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum SheetsError {
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
@@ -16,6 +19,25 @@ pub enum SheetsError {
     Api { status: StatusCode, message: String },
     #[error("could not parse Sheets response: {0}")]
     Parse(serde_json::Error),
+    #[error("invalid id: {0}")]
+    InvalidId(String),
+    #[error("response body exceeds the {cap}-byte cap (at least {actual} bytes)")]
+    TooLarge { cap: usize, actual: usize },
+}
+
+impl From<InvalidPathSegment> for SheetsError {
+    fn from(e: InvalidPathSegment) -> Self {
+        SheetsError::InvalidId(e.0)
+    }
+}
+
+impl From<ReadBodyError> for SheetsError {
+    fn from(e: ReadBodyError) -> Self {
+        match e {
+            ReadBodyError::Http(e) => SheetsError::Http(e),
+            ReadBodyError::TooLarge { cap, actual } => SheetsError::TooLarge { cap, actual },
+        }
+    }
 }
 
 const BASE: &str = "https://sheets.googleapis.com/v4/spreadsheets";
@@ -49,6 +71,7 @@ impl SheetsClient {
         include_grid_data: bool,
         fields: Option<&str>,
     ) -> Result<Value, SheetsError> {
+        let spreadsheet_id = seg(spreadsheet_id)?;
         let mut q: Vec<(String, String)> = vec![];
         for r in ranges {
             q.push(("ranges".into(), r.clone()));
@@ -76,6 +99,8 @@ impl SheetsClient {
         value_render_option: Option<&str>,
         date_time_render_option: Option<&str>,
     ) -> Result<Value, SheetsError> {
+        let spreadsheet_id = seg(spreadsheet_id)?;
+        let range = seg(range)?;
         let mut q: Vec<(String, String)> = vec![];
         if let Some(d) = major_dimension {
             q.push(("majorDimension".into(), d.into()));
@@ -102,6 +127,7 @@ impl SheetsClient {
         major_dimension: Option<&str>,
         value_render_option: Option<&str>,
     ) -> Result<Value, SheetsError> {
+        let spreadsheet_id = seg(spreadsheet_id)?;
         let mut q: Vec<(String, String)> = vec![];
         for r in ranges {
             q.push(("ranges".into(), r.clone()));
@@ -129,6 +155,8 @@ impl SheetsClient {
         value_input_option: &str,
         major_dimension: Option<&str>,
     ) -> Result<Value, SheetsError> {
+        let spreadsheet_id = seg(spreadsheet_id)?;
+        let range = seg(range)?;
         let mut q: Vec<(String, String)> =
             vec![("valueInputOption".into(), value_input_option.into())];
         if let Some(d) = major_dimension {
@@ -152,6 +180,8 @@ impl SheetsClient {
         value_input_option: &str,
         insert_data_option: Option<&str>,
     ) -> Result<Value, SheetsError> {
+        let spreadsheet_id = seg(spreadsheet_id)?;
+        let range = seg(range)?;
         let mut q: Vec<(String, String)> =
             vec![("valueInputOption".into(), value_input_option.into())];
         if let Some(i) = insert_data_option {
@@ -172,6 +202,8 @@ impl SheetsClient {
         spreadsheet_id: &str,
         range: &str,
     ) -> Result<Value, SheetsError> {
+        let spreadsheet_id = seg(spreadsheet_id)?;
+        let range = seg(range)?;
         let body = serde_json::json!({});
         self.request(
             Method::POST,
@@ -187,6 +219,7 @@ impl SheetsClient {
         spreadsheet_id: &str,
         body: &Value,
     ) -> Result<Value, SheetsError> {
+        let spreadsheet_id = seg(spreadsheet_id)?;
         self.request(
             Method::POST,
             format!("{BASE}/{spreadsheet_id}/values:batchUpdate"),
@@ -199,12 +232,13 @@ impl SheetsClient {
     /// Schema-level batch update (add/delete sheets, formatting, conditional
     /// formatting, charts, etc.). Body shape:
     /// `{"requests":[{"addSheet":{...}},{"updateCells":{...}},...],"includeSpreadsheetInResponse":bool}`.
-    /// See https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/request
+    /// See <https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/request>
     pub async fn batch_update(
         &self,
         spreadsheet_id: &str,
         body: &Value,
     ) -> Result<Value, SheetsError> {
+        let spreadsheet_id = seg(spreadsheet_id)?;
         self.request(
             Method::POST,
             format!("{BASE}/{spreadsheet_id}:batchUpdate"),
@@ -237,16 +271,16 @@ impl SheetsClient {
         }
         let resp = req.send().await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         if status.is_success() {
-            if text.is_empty() {
+            if bytes.is_empty() {
                 return Ok(serde_json::json!({}));
             }
-            return serde_json::from_str(&text).map_err(SheetsError::Parse);
+            return serde_json::from_slice(&bytes).map_err(SheetsError::Parse);
         }
         Err(SheetsError::Api {
             status,
-            message: text.chars().take(800).collect(),
+            message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
         })
     }
 }

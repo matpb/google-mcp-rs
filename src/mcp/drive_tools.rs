@@ -12,11 +12,14 @@ use serde_json::json;
 
 use crate::errors::{McpError, to_mcp};
 use crate::files::{FileJail, INLINE_MAX_BYTES, guess_mime};
-use crate::google::drive::{DriveClient, DriveError};
+use crate::google::drive::DriveClient;
+use crate::mcp::common;
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
 
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
+/// Hard cap on decoded upload size for multipart Drive uploads.
+const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
 
 #[tool_router(router = drive_router, vis = "pub(crate)")]
 impl GoogleMcp {
@@ -29,8 +32,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveListFilesParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         client
             .list_files(
                 p.q.as_deref(),
@@ -55,13 +57,12 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveGetFileParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         client
             .get_file(&p.file_id, p.fields.as_deref(), p.supports_all_drives)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
+            .map_err(|e| common::reclassify_not_found(e, "file", &p.file_id, "drive"))
     }
 
     #[tool(
@@ -73,8 +74,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveCreateFolderParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         let mut body = json!({
             "name": p.name,
             "mimeType": FOLDER_MIME,
@@ -94,7 +94,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_create_file",
-        description = "Upload a new file to Drive. Content comes from `path` (preferred — a file inside the server's FILE_ROOT exchange dir) OR `data_base64` (fallback). `mime_type` is inferred from the name/path when omitted. Multipart upload — keep payload below ~5 MB; for larger files use a follow-up resumable-upload tool (not yet wired)."
+        description = "Upload a new file to Drive. Content comes from `path` (preferred — a file inside the server's FILE_ROOT exchange dir) OR `data_base64` (fallback). `mime_type` is inferred from the name/path when omitted. Multipart upload — Google recommends this path for files under ~5 MB; this server hard-caps decoded content at 256 MiB and rejects anything larger, so use a follow-up resumable-upload tool (not yet wired) for bigger files."
     )]
     async fn drive_create_file(
         &self,
@@ -110,8 +110,7 @@ impl GoogleMcp {
             p.mime_type.as_deref(),
             &p.name,
         )?;
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         let mut metadata = json!({
             "name": p.name,
             "mimeType": mime,
@@ -138,8 +137,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveUpdateMetadataParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         let mut body = json!({});
         if let Some(name) = p.name {
             body["name"] = json!(name);
@@ -159,7 +157,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
+            .map_err(|e| common::reclassify_not_found(e, "file", &p.file_id, "drive"))
     }
 
     #[tool(
@@ -180,13 +178,12 @@ impl GoogleMcp {
             // mime_type nor a path extension is available.
             p.path.as_deref().unwrap_or(""),
         )?;
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         client
             .update_content(&p.file_id, &bytes, &mime)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
+            .map_err(|e| common::reclassify_not_found(e, "file", &p.file_id, "drive"))
     }
 
     #[tool(
@@ -198,12 +195,11 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveDownloadFileParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         let (ct, bytes) = client
             .download_file(&p.file_id)
             .await
-            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))?;
+            .map_err(|e| common::reclassify_not_found(e, "file", &p.file_id, "drive"))?;
         deliver_bytes(
             self.state.config.file_jail.as_ref(),
             p.dest_path.as_deref(),
@@ -221,12 +217,11 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveExportFileParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         let (ct, bytes) = client
             .export_file(&p.file_id, &p.export_mime_type)
             .await
-            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))?;
+            .map_err(|e| common::reclassify_not_found(e, "file", &p.file_id, "drive"))?;
         deliver_bytes(
             self.state.config.file_jail.as_ref(),
             p.dest_path.as_deref(),
@@ -244,8 +239,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveCopyFileParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         let mut metadata = json!({});
         if let Some(name) = p.name {
             metadata["name"] = json!(name);
@@ -257,7 +251,7 @@ impl GoogleMcp {
             .copy_file(&p.file_id, &metadata)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
+            .map_err(|e| common::reclassify_not_found(e, "file", &p.file_id, "drive"))
     }
 
     #[tool(
@@ -269,13 +263,12 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveTrashFileParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         client
             .trash_file(&p.file_id)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
+            .map_err(|e| common::reclassify_not_found(e, "file", &p.file_id, "drive"))
     }
 
     #[tool(
@@ -287,13 +280,12 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveDeletePermanentParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         client
             .delete_permanent(&p.file_id)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
+            .map_err(|e| common::reclassify_not_found(e, "file", &p.file_id, "drive"))
     }
 
     #[tool(
@@ -306,8 +298,7 @@ impl GoogleMcp {
         Parameters(p): Parameters<DriveSharePermissionParams>,
     ) -> Result<String, ErrorData> {
         validate_share(&p)?;
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         let mut perm = json!({
             "role": p.role,
             "type": p.r#type,
@@ -327,7 +318,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
+            .map_err(|e| common::reclassify_not_found(e, "file", &p.file_id, "drive"))
     }
 
     #[tool(
@@ -339,13 +330,12 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveListPermissionsParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         client
             .list_permissions(&p.file_id)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_drive_not_found(e, "file", &p.file_id))
+            .map_err(|e| common::reclassify_not_found(e, "file", &p.file_id, "drive"))
     }
 
     #[tool(
@@ -357,8 +347,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DriveDeletePermissionParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DriveClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.drive_for(&parts).await?;
         // 404 here is ambiguous between file_id and permission_id;
         // surface it as `permission` not_found since the parent file
         // existence is implicit (the agent could discover that themselves).
@@ -366,19 +355,18 @@ impl GoogleMcp {
             .delete_permission(&p.file_id, &p.permission_id)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_drive_not_found(e, "permission", &p.permission_id))
+            .map_err(|e| common::reclassify_not_found(e, "permission", &p.permission_id, "drive"))
     }
 }
 
-/// Re-classify a Drive 404 into a typed `NotFound` so agents target their
-/// discovery (e.g. `drive_list_files`) correctly.
-fn reclassify_drive_not_found(e: DriveError, kind: &'static str, id: &str) -> ErrorData {
-    if let DriveError::Api { status, .. } = &e
-        && status.as_u16() == 404
-    {
-        return McpError::not_found(kind, id, "drive").into();
+impl GoogleMcp {
+    pub(crate) async fn drive_for(&self, parts: &Parts) -> Result<DriveClient, ErrorData> {
+        let session = self.resolve_session(parts).await?;
+        Ok(DriveClient::new(
+            (*self.state.http).clone(),
+            session.access_token,
+        ))
     }
-    to_mcp(e)
 }
 
 fn validate_share(p: &DriveSharePermissionParams) -> Result<(), ErrorData> {
@@ -415,7 +403,7 @@ fn validate_share(p: &DriveSharePermissionParams) -> Result<(), ErrorData> {
     Ok(())
 }
 
-/// Error for when a tool needs FILE_ROOT but the operator hasn't enabled it.
+/// Error for when a tool needs `FILE_ROOT` but the operator hasn't enabled it.
 fn no_file_root(what: &str) -> ErrorData {
     McpError::invalid_input(format!(
         "this server has no file-exchange directory configured (FILE_ROOT unset), so `{what}` cannot be used"
@@ -427,7 +415,7 @@ fn no_file_root(what: &str) -> ErrorData {
 }
 
 /// Resolve upload content + effective MIME from exactly one of `path`
-/// (via the FILE_ROOT jail) or `data_base64`. `name_for_mime` is the file
+/// (via the `FILE_ROOT` jail) or `data_base64`. `name_for_mime` is the file
 /// name/path used to infer a MIME type when none was supplied.
 fn resolve_upload_content(
     jail: Option<&FileJail>,
@@ -448,21 +436,37 @@ fn resolve_upload_content(
         (Some(p), None) => {
             let jail = jail.ok_or_else(|| no_file_root("path"))?;
             let bytes = jail.read(p).map_err(to_mcp)?;
+            if bytes.len() > MAX_UPLOAD_BYTES {
+                return Err(upload_too_large(bytes.len()));
+            }
             let mime = mime_type
                 .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| guess_mime(p).to_string());
+                .map_or_else(|| guess_mime(p).to_string(), str::to_string);
             Ok((bytes, mime))
         }
         (None, Some(b64)) => {
+            // Reject on encoded length before decoding to bound peak memory.
+            let encoded_len = b64.trim().len() as u64;
+            if encoded_len * 3 / 4 > MAX_UPLOAD_BYTES as u64 {
+                return Err(upload_too_large((encoded_len * 3 / 4) as usize));
+            }
             let bytes = decode_b64(b64)?;
+            if bytes.len() > MAX_UPLOAD_BYTES {
+                return Err(upload_too_large(bytes.len()));
+            }
             let mime = mime_type
                 .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| guess_mime(name_for_mime).to_string());
+                .map_or_else(|| guess_mime(name_for_mime).to_string(), str::to_string);
             Ok((bytes, mime))
         }
     }
+}
+
+fn upload_too_large(approx_bytes: usize) -> ErrorData {
+    McpError::invalid_input(format!(
+        "upload content is ~{approx_bytes} bytes, over the {MAX_UPLOAD_BYTES}-byte cap for multipart Drive uploads"
+    ))
+    .into()
 }
 
 /// Deliver downloaded/exported bytes to the caller: write to `dest_path`
@@ -560,6 +564,24 @@ mod tests {
         let b64 = STANDARD.encode(b"x");
         assert!(resolve_upload_content(None, Some("x"), Some(&b64), None, "x").is_err());
         assert!(resolve_upload_content(None, None, None, None, "x").is_err());
+    }
+
+    #[test]
+    fn resolve_upload_base64_over_cap_rejected() {
+        let big = vec![0u8; MAX_UPLOAD_BYTES + 1];
+        let b64 = STANDARD.encode(&big);
+        let err = resolve_upload_content(None, None, Some(&b64), None, "x.bin").unwrap_err();
+        assert!(err.message.contains("cap"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn resolve_upload_path_over_cap_rejected() {
+        let jail = temp_jail();
+        let big = vec![0u8; MAX_UPLOAD_BYTES + 1];
+        jail.write("big.bin", &big).unwrap();
+        let err = resolve_upload_content(Some(&jail), Some("big.bin"), None, None, "big.bin")
+            .unwrap_err();
+        assert!(err.message.contains("cap"), "got: {}", err.message);
     }
 
     #[test]

@@ -8,10 +8,14 @@ use rmcp::{ErrorData, tool, tool_router};
 use serde_json::{Value, json};
 
 use crate::errors::{McpError, to_mcp};
-use crate::google::searchconsole::{SearchConsoleClient, SearchConsoleError};
+use crate::google::searchconsole::SearchConsoleClient;
 use crate::mcp::calendar_tools::EmptyParams;
+use crate::mcp::common;
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
+
+/// Search Console's documented cap on `rowLimit` for a `searchanalytics.query` call.
+const MAX_ROW_LIMIT: u32 = 25000;
 
 #[tool_router(router = searchconsole_router, vis = "pub(crate)")]
 impl GoogleMcp {
@@ -41,13 +45,13 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SearchConsoleSiteUrlParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.site_url, "site_url")?;
+        common::ensure_non_empty(&p.site_url, "site_url", "searchconsole")?;
         let client = self.searchconsole_for(&parts).await?;
         client
             .get_site(&p.site_url)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_searchconsole_not_found(e, "site", &p.site_url))
+            .map_err(|e| common::reclassify_not_found(e, "site", &p.site_url, "searchconsole"))
     }
 
     #[tool(
@@ -59,13 +63,13 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SearchConsoleListSitemapsParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.site_url, "site_url")?;
+        common::ensure_non_empty(&p.site_url, "site_url", "searchconsole")?;
         let client = self.searchconsole_for(&parts).await?;
         client
             .list_sitemaps(&p.site_url, p.sitemap_index.as_deref())
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_searchconsole_not_found(e, "site", &p.site_url))
+            .map_err(|e| common::reclassify_not_found(e, "site", &p.site_url, "searchconsole"))
     }
 
     #[tool(
@@ -77,14 +81,14 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SearchConsoleSitemapParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.site_url, "site_url")?;
-        ensure_non_empty(&p.feedpath, "feedpath")?;
+        common::ensure_non_empty(&p.site_url, "site_url", "searchconsole")?;
+        common::ensure_non_empty(&p.feedpath, "feedpath", "searchconsole")?;
         let client = self.searchconsole_for(&parts).await?;
         client
             .get_sitemap(&p.site_url, &p.feedpath)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_searchconsole_not_found(e, "sitemap", &p.feedpath))
+            .map_err(|e| common::reclassify_not_found(e, "sitemap", &p.feedpath, "searchconsole"))
     }
 
     #[tool(
@@ -96,14 +100,14 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SearchConsoleSitemapParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.site_url, "site_url")?;
-        ensure_non_empty(&p.feedpath, "feedpath")?;
+        common::ensure_non_empty(&p.site_url, "site_url", "searchconsole")?;
+        common::ensure_non_empty(&p.feedpath, "feedpath", "searchconsole")?;
         let client = self.searchconsole_for(&parts).await?;
         client
             .submit_sitemap(&p.site_url, &p.feedpath)
             .await
             .map(|_| json!({"submitted": p.feedpath}).to_string())
-            .map_err(|e| reclassify_searchconsole_not_found(e, "sitemap", &p.feedpath))
+            .map_err(|e| common::reclassify_not_found(e, "sitemap", &p.feedpath, "searchconsole"))
     }
 
     #[tool(
@@ -115,15 +119,15 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SearchConsoleSitemapParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.site_url, "site_url")?;
-        ensure_non_empty(&p.feedpath, "feedpath")?;
+        common::ensure_non_empty(&p.site_url, "site_url", "searchconsole")?;
+        common::ensure_non_empty(&p.feedpath, "feedpath", "searchconsole")?;
         let client = self.searchconsole_for(&parts).await?;
         let feedpath = p.feedpath.clone();
         client
             .delete_sitemap(&p.site_url, &p.feedpath)
             .await
             .map(|_| json!({"deleted": feedpath}).to_string())
-            .map_err(|e| reclassify_searchconsole_not_found(e, "sitemap", &p.feedpath))
+            .map_err(|e| common::reclassify_not_found(e, "sitemap", &p.feedpath, "searchconsole"))
     }
 
     #[tool(
@@ -135,7 +139,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SearchConsoleQueryParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.site_url, "site_url")?;
+        common::ensure_non_empty(&p.site_url, "site_url", "searchconsole")?;
         ensure_date(&p.start_date, "start_date")?;
         ensure_date(&p.end_date, "end_date")?;
         if let Some(dims) = &p.dimensions {
@@ -160,11 +164,14 @@ impl GoogleMcp {
         if let Some(s) = &p.data_state {
             ensure_one_of(s, "data_state", DATA_STATES)?;
         }
+        ensure_hour_requires_hourly_all(p.dimensions.as_deref(), p.data_state.as_deref())?;
         if let Some(limit) = p.row_limit
-            && !(1..=25000).contains(&limit)
+            && !(1..=MAX_ROW_LIMIT).contains(&limit)
         {
             return Err(McpError::invalid_input("`row_limit` out of range")
-                .with_hint("`row_limit` must be between 1 and 25000.")
+                .with_hint(format!(
+                    "`row_limit` must be between 1 and {MAX_ROW_LIMIT}."
+                ))
                 .with_service("searchconsole")
                 .into());
         }
@@ -211,7 +218,7 @@ impl GoogleMcp {
             .query_search_analytics(&p.site_url, &body)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_searchconsole_not_found(e, "site", &p.site_url))
+            .map_err(|e| common::reclassify_not_found(e, "site", &p.site_url, "searchconsole"))
     }
 
     #[tool(
@@ -223,8 +230,8 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SearchConsoleInspectUrlParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.site_url, "site_url")?;
-        ensure_non_empty(&p.inspection_url, "inspection_url")?;
+        common::ensure_non_empty(&p.site_url, "site_url", "searchconsole")?;
+        common::ensure_non_empty(&p.inspection_url, "inspection_url", "searchconsole")?;
         let mut body = json!({"inspectionUrl": p.inspection_url, "siteUrl": p.site_url});
         if let Some(l) = &p.language_code {
             body["languageCode"] = json!(l);
@@ -234,7 +241,7 @@ impl GoogleMcp {
             .inspect_url(&body)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_searchconsole_not_found(e, "url", &p.inspection_url))
+            .map_err(|e| common::reclassify_not_found(e, "url", &p.inspection_url, "searchconsole"))
     }
 }
 
@@ -249,30 +256,6 @@ impl GoogleMcp {
             session.access_token,
         ))
     }
-}
-
-fn reclassify_searchconsole_not_found(
-    e: SearchConsoleError,
-    kind: &'static str,
-    id: &str,
-) -> ErrorData {
-    if let SearchConsoleError::Api { status, .. } = &e
-        && status.as_u16() == 404
-    {
-        return McpError::not_found(kind, id, "searchconsole").into();
-    }
-    to_mcp(e)
-}
-
-fn ensure_non_empty(s: &str, field: &str) -> Result<(), ErrorData> {
-    if s.trim().is_empty() {
-        return Err(
-            McpError::invalid_input(format!("`{field}` must not be empty"))
-                .with_service("searchconsole")
-                .into(),
-        );
-    }
-    Ok(())
 }
 
 fn ensure_date(s: &str, field: &str) -> Result<(), ErrorData> {
@@ -300,6 +283,23 @@ fn ensure_one_of(value: &str, field: &str, allowed: &[&str]) -> Result<(), Error
                 .with_service("searchconsole")
                 .into(),
         );
+    }
+    Ok(())
+}
+
+/// `hour` in `dimensions` is only valid with `data_state = hourly_all`.
+fn ensure_hour_requires_hourly_all(
+    dimensions: Option<&[String]>,
+    data_state: Option<&str>,
+) -> Result<(), ErrorData> {
+    let has_hour = dimensions.is_some_and(|dims| dims.iter().any(|d| d == "hour"));
+    if has_hour && data_state != Some("hourly_all") {
+        return Err(McpError::invalid_input(
+            "`dimensions` includes `hour`, which requires `data_state = \"hourly_all\"`",
+        )
+        .with_hint("Set `data_state` to `hourly_all` when grouping by `hour`.")
+        .with_service("searchconsole")
+        .into());
     }
     Ok(())
 }
@@ -350,5 +350,17 @@ mod tests {
         let err = ensure_one_of("bogus", "search_type", SEARCH_TYPES).unwrap_err();
         let data = err.data.expect("structured error data");
         assert!(data["hint"].as_str().unwrap().contains("googleNews"));
+    }
+
+    #[test]
+    fn hour_dimension_requires_hourly_all_data_state() {
+        let dims = vec!["hour".to_string()];
+        assert!(ensure_hour_requires_hourly_all(Some(&dims), Some("hourly_all")).is_ok());
+        assert!(ensure_hour_requires_hourly_all(Some(&dims), None).is_err());
+        assert!(ensure_hour_requires_hourly_all(Some(&dims), Some("final")).is_err());
+
+        let no_hour = vec!["country".to_string()];
+        assert!(ensure_hour_requires_hourly_all(Some(&no_hour), None).is_ok());
+        assert!(ensure_hour_requires_hourly_all(None, None).is_ok());
     }
 }

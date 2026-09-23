@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 use crate::errors::{McpError, to_mcp};
 use crate::google::calendar::{
-    CalendarClient, CalendarError, EVENTS_ORDER_BY_VALUES, EventsListQuery, SEND_UPDATES_VALUES,
+    CalendarClient, EVENTS_ORDER_BY_VALUES, EventsListQuery, SEND_UPDATES_VALUES,
 };
+use crate::mcp::common;
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
 
@@ -27,8 +28,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<CalendarListCalendarsParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         client
             .list_calendar_list(
                 p.max_results,
@@ -50,14 +50,13 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<CalendarGetCalendarParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         let cid = p.calendar_id.clone();
         client
             .get_calendar(&p.calendar_id)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_calendar_not_found(e, "calendar", &cid))
+            .map_err(|e| common::reclassify_not_found(e, "calendar", &cid, "calendar"))
     }
 
     #[tool(
@@ -69,8 +68,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<CalendarCreateCalendarParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         let mut body = json!({"summary": p.summary});
         if let Some(d) = p.description {
             body["description"] = json!(d);
@@ -97,14 +95,13 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<CalendarDeleteCalendarParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         let cid = p.calendar_id.clone();
         client
             .delete_calendar(&p.calendar_id)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_calendar_not_found(e, "calendar", &cid))
+            .map_err(|e| common::reclassify_not_found(e, "calendar", &cid, "calendar"))
     }
 
     #[tool(
@@ -117,8 +114,7 @@ impl GoogleMcp {
         Parameters(p): Parameters<CalendarListEventsParams>,
     ) -> Result<String, ErrorData> {
         validate_order_by(p.order_by.as_deref(), p.single_events)?;
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         let cid = p.calendar_id.clone();
         let q = EventsListQuery {
             time_min: p.time_min.as_deref(),
@@ -136,7 +132,7 @@ impl GoogleMcp {
             .list_events(&p.calendar_id, &q)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_calendar_not_found(e, "calendar", &cid))
+            .map_err(|e| common::reclassify_not_found(e, "calendar", &cid, "calendar"))
     }
 
     #[tool(
@@ -148,14 +144,13 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<CalendarGetEventParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         let eid = p.event_id.clone();
         client
             .get_event(&p.calendar_id, &p.event_id, p.time_zone.as_deref())
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_calendar_not_found(e, "event", &eid))
+            .map_err(|e| common::reclassify_not_found(e, "event", &eid, "calendar"))
     }
 
     #[tool(
@@ -169,8 +164,7 @@ impl GoogleMcp {
     ) -> Result<String, ErrorData> {
         validate_send_updates(p.send_updates.as_deref())?;
         validate_event_fields(&p.event, /* require_summary_and_window= */ true)?;
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         let cid = p.calendar_id.clone();
         let body = build_event_body(&p.event)?;
         let conf_version = if p.event.add_conference {
@@ -187,7 +181,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_calendar_not_found(e, "calendar", &cid))
+            .map_err(|e| common::reclassify_not_found(e, "calendar", &cid, "calendar"))
     }
 
     #[tool(
@@ -203,14 +197,13 @@ impl GoogleMcp {
             return Err(McpError::invalid_input("`text` must not be empty").into());
         }
         validate_send_updates(p.send_updates.as_deref())?;
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         let cid = p.calendar_id.clone();
         client
             .quick_add_event(&p.calendar_id, &p.text, p.send_updates.as_deref())
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_calendar_not_found(e, "calendar", &cid))
+            .map_err(|e| common::reclassify_not_found(e, "calendar", &cid, "calendar"))
     }
 
     #[tool(
@@ -224,11 +217,10 @@ impl GoogleMcp {
     ) -> Result<String, ErrorData> {
         validate_send_updates(p.send_updates.as_deref())?;
         validate_event_fields(&p.event, /* require_summary_and_window= */ false)?;
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         let eid = p.event_id.clone();
         let body = build_event_body(&p.event)?;
-        if body.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+        if body.as_object().is_none_or(serde_json::Map::is_empty) {
             return Err(McpError::invalid_input(
                 "patch must include at least one field to update",
             )
@@ -250,7 +242,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_calendar_not_found(e, "event", &eid))
+            .map_err(|e| common::reclassify_not_found(e, "event", &eid, "calendar"))
     }
 
     #[tool(
@@ -263,14 +255,13 @@ impl GoogleMcp {
         Parameters(p): Parameters<CalendarDeleteEventParams>,
     ) -> Result<String, ErrorData> {
         validate_send_updates(p.send_updates.as_deref())?;
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         let eid = p.event_id.clone();
         client
             .delete_event(&p.calendar_id, &p.event_id, p.send_updates.as_deref())
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_calendar_not_found(e, "event", &eid))
+            .map_err(|e| common::reclassify_not_found(e, "event", &eid, "calendar"))
     }
 
     #[tool(
@@ -283,8 +274,7 @@ impl GoogleMcp {
         Parameters(p): Parameters<CalendarMoveEventParams>,
     ) -> Result<String, ErrorData> {
         validate_send_updates(p.send_updates.as_deref())?;
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         let eid = p.event_id.clone();
         client
             .move_event(
@@ -295,7 +285,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_calendar_not_found(e, "event", &eid))
+            .map_err(|e| common::reclassify_not_found(e, "event", &eid, "calendar"))
     }
 
     #[tool(
@@ -330,7 +320,7 @@ impl GoogleMcp {
         let event = client
             .get_event(&p.calendar_id, &p.event_id, None)
             .await
-            .map_err(|e| reclassify_calendar_not_found(e, "event", &eid))?;
+            .map_err(|e| common::reclassify_not_found(e, "event", &eid, "calendar"))?;
 
         let mut attendees: Vec<Value> = event
             .get("attendees")
@@ -338,12 +328,11 @@ impl GoogleMcp {
             .cloned()
             .unwrap_or_default();
         let mut matched = false;
-        for a in attendees.iter_mut() {
+        for a in &mut attendees {
             let email_match = a
                 .get("email")
                 .and_then(|v| v.as_str())
-                .map(|s| s.eq_ignore_ascii_case(&target_email))
-                .unwrap_or(false);
+                .is_some_and(|s| s.eq_ignore_ascii_case(&target_email));
             if email_match {
                 a["responseStatus"] = json!(p.response_status);
                 if let Some(c) = &p.comment {
@@ -375,7 +364,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_calendar_not_found(e, "event", &eid))
+            .map_err(|e| common::reclassify_not_found(e, "event", &eid, "calendar"))
     }
 
     #[tool(
@@ -387,8 +376,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<CalendarFreebusyParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         let ids: Vec<String> = if p.calendar_ids.is_empty() {
             vec!["primary".into()]
         } else {
@@ -419,13 +407,22 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(_): Parameters<EmptyParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = CalendarClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.calendar_for(&parts).await?;
         client
             .list_colors()
             .await
             .map(|v| v.to_string())
             .map_err(to_mcp)
+    }
+}
+
+impl GoogleMcp {
+    pub(crate) async fn calendar_for(&self, parts: &Parts) -> Result<CalendarClient, ErrorData> {
+        let session = self.resolve_session(parts).await?;
+        Ok(CalendarClient::new(
+            (*self.state.http).clone(),
+            session.access_token,
+        ))
     }
 }
 
@@ -712,15 +709,6 @@ fn build_event_endpoint(
 /// Re-classify a Calendar 404 with the right resource kind so agents
 /// target the right discovery (`calendar_list_calendars` vs
 /// `calendar_list_events`).
-fn reclassify_calendar_not_found(e: CalendarError, kind: &'static str, id: &str) -> ErrorData {
-    if let CalendarError::Api { status, .. } = &e
-        && status.as_u16() == 404
-    {
-        return McpError::not_found(kind, id, "calendar").into();
-    }
-    to_mcp(e)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,9 +719,9 @@ mod tests {
         summary: Option<&str>,
     ) -> CalendarEventFields {
         CalendarEventFields {
-            summary: summary.map(|s| s.to_string()),
-            start_date_time: start_dt.map(|s| s.to_string()),
-            end_date_time: end_dt.map(|s| s.to_string()),
+            summary: summary.map(std::string::ToString::to_string),
+            start_date_time: start_dt.map(std::string::ToString::to_string),
+            end_date_time: end_dt.map(std::string::ToString::to_string),
             ..Default::default()
         }
     }
@@ -796,14 +784,14 @@ mod tests {
             summary: Some("Standup".into()),
             start_date_time: Some("2026-05-05T10:00:00-04:00".into()),
             end_date_time: Some("2026-05-05T10:30:00-04:00".into()),
-            time_zone: Some("America/Montreal".into()),
+            time_zone: Some("America/New_York".into()),
             ..Default::default()
         };
         let body = build_event_body(&f).unwrap();
         let obj = body.as_object().unwrap();
         assert_eq!(obj["summary"], json!("Standup"));
         assert_eq!(obj["start"]["dateTime"], json!("2026-05-05T10:00:00-04:00"));
-        assert_eq!(obj["start"]["timeZone"], json!("America/Montreal"));
+        assert_eq!(obj["start"]["timeZone"], json!("America/New_York"));
         assert_eq!(obj["end"]["dateTime"], json!("2026-05-05T10:30:00-04:00"));
     }
 

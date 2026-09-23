@@ -15,7 +15,7 @@ pub fn verify_s256(code_verifier: &str, code_challenge: &str) -> bool {
     constant_time_eq(computed.as_bytes(), code_challenge.as_bytes())
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

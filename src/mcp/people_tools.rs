@@ -9,10 +9,16 @@ use serde_json::{Value, json};
 
 use crate::errors::{McpError, to_mcp};
 use crate::google::people::{
-    DEFAULT_PERSON_FIELDS, PeopleClient, PeopleError, group_resource_name, person_resource_name,
+    DEFAULT_PERSON_FIELDS, PeopleClient, group_resource_name, person_resource_name,
 };
+use crate::mcp::common;
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
+
+/// People API's documented cap on `add`/`remove` entries per group-membership call.
+const MAX_GROUP_MEMBERS_PER_CALL: usize = 1000;
+/// People API's documented cap on `resourceNames` per `people.getBatchGet` call.
+const MAX_BATCH_GET_CONTACTS: usize = 200;
 
 #[tool_router(router = people_router, vis = "pub(crate)")]
 impl GoogleMcp {
@@ -48,7 +54,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<PeopleGetContactParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.resource_name, "resource_name")?;
+        common::ensure_non_empty(&p.resource_name, "resource_name", "people")?;
         let client = self.people_for(&parts).await?;
         let name = person_resource_name(&p.resource_name);
         let fields = p.person_fields.as_deref().unwrap_or(DEFAULT_PERSON_FIELDS);
@@ -56,7 +62,7 @@ impl GoogleMcp {
             .get_person(&name, fields)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_people_not_found(e, "contact", &name))
+            .map_err(|e| common::reclassify_not_found(e, "contact", &name, "people"))
     }
 
     #[tool(
@@ -75,9 +81,9 @@ impl GoogleMcp {
                     .into(),
             );
         }
-        if p.resource_names.len() > 200 {
+        if p.resource_names.len() > MAX_BATCH_GET_CONTACTS {
             return Err(McpError::invalid_input(format!(
-                "`resource_names` has {} entries; People allows at most 200 per call",
+                "`resource_names` has {} entries; People allows at most {MAX_BATCH_GET_CONTACTS} per call",
                 p.resource_names.len()
             ))
             .with_service("people")
@@ -106,7 +112,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<PeopleSearchContactsParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.query, "query")?;
+        common::ensure_non_empty(&p.query, "query", "people")?;
         let client = self.people_for(&parts).await?;
         let fields = p.person_fields.as_deref().unwrap_or(DEFAULT_PERSON_FIELDS);
         client
@@ -126,7 +132,7 @@ impl GoogleMcp {
         Parameters(p): Parameters<PeopleCreateContactParams>,
     ) -> Result<String, ErrorData> {
         let (body, _) = build_person(&p.fields)?;
-        if body.as_object().is_none_or(|o| o.is_empty()) {
+        if body.as_object().is_none_or(serde_json::Map::is_empty) {
             return Err(McpError::invalid_input("no contact fields supplied")
                 .with_hint("Set at least one of given_name, family_name, emails, phones, organization, notes, or pass a raw `person`.")
                 .with_service("people")
@@ -149,7 +155,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<PeopleUpdateContactParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.resource_name, "resource_name")?;
+        common::ensure_non_empty(&p.resource_name, "resource_name", "people")?;
         let (mut body, derived) = build_person(&p.fields)?;
         let mask = match p.update_person_fields.as_deref() {
             Some(m) if !m.trim().is_empty() => m.trim().to_string(),
@@ -171,7 +177,7 @@ impl GoogleMcp {
                 let current = client
                     .get_person(&name, "metadata")
                     .await
-                    .map_err(|e| reclassify_people_not_found(e, "contact", &name))?;
+                    .map_err(|e| common::reclassify_not_found(e, "contact", &name, "people"))?;
                 current
                     .get("etag")
                     .and_then(Value::as_str)
@@ -189,7 +195,7 @@ impl GoogleMcp {
             .update_contact(&name, &body, &mask, DEFAULT_PERSON_FIELDS)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_people_not_found(e, "contact", &name))
+            .map_err(|e| common::reclassify_not_found(e, "contact", &name, "people"))
     }
 
     #[tool(
@@ -201,14 +207,14 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<PeopleDeleteContactParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.resource_name, "resource_name")?;
+        common::ensure_non_empty(&p.resource_name, "resource_name", "people")?;
         let client = self.people_for(&parts).await?;
         let name = person_resource_name(&p.resource_name);
         client
             .delete_contact(&name)
             .await
             .map(|_| json!({"deleted": name}).to_string())
-            .map_err(|e| reclassify_people_not_found(e, "contact", &name))
+            .map_err(|e| common::reclassify_not_found(e, "contact", &name, "people"))
     }
 
     #[tool(
@@ -237,14 +243,14 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<PeopleGetContactGroupParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.resource_name, "resource_name")?;
+        common::ensure_non_empty(&p.resource_name, "resource_name", "people")?;
         let client = self.people_for(&parts).await?;
         let name = group_resource_name(&p.resource_name);
         client
             .get_contact_group(&name, p.max_members)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_people_not_found(e, "contact group", &name))
+            .map_err(|e| common::reclassify_not_found(e, "contact group", &name, "people"))
     }
 
     #[tool(
@@ -256,7 +262,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<PeopleCreateContactGroupParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.name, "name")?;
+        common::ensure_non_empty(&p.name, "name", "people")?;
         let client = self.people_for(&parts).await?;
         client
             .create_contact_group(&p.name)
@@ -274,8 +280,8 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<PeopleUpdateContactGroupParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.resource_name, "resource_name")?;
-        ensure_non_empty(&p.name, "name")?;
+        common::ensure_non_empty(&p.resource_name, "resource_name", "people")?;
+        common::ensure_non_empty(&p.name, "name", "people")?;
         let client = self.people_for(&parts).await?;
         let name = group_resource_name(&p.resource_name);
 
@@ -285,7 +291,9 @@ impl GoogleMcp {
                 let current = client
                     .get_contact_group(&name, Some(0))
                     .await
-                    .map_err(|e| reclassify_people_not_found(e, "contact group", &name))?;
+                    .map_err(|e| {
+                        common::reclassify_not_found(e, "contact group", &name, "people")
+                    })?;
                 current
                     .get("etag")
                     .and_then(Value::as_str)
@@ -297,7 +305,7 @@ impl GoogleMcp {
             .update_contact_group(&name, &p.name, etag.as_deref())
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_people_not_found(e, "contact group", &name))
+            .map_err(|e| common::reclassify_not_found(e, "contact group", &name, "people"))
     }
 
     #[tool(
@@ -309,14 +317,14 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<PeopleDeleteContactGroupParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.resource_name, "resource_name")?;
+        common::ensure_non_empty(&p.resource_name, "resource_name", "people")?;
         let client = self.people_for(&parts).await?;
         let name = group_resource_name(&p.resource_name);
         client
             .delete_contact_group(&name, p.delete_contacts)
             .await
             .map(|_| json!({"deleted": name, "deletedContacts": p.delete_contacts}).to_string())
-            .map_err(|e| reclassify_people_not_found(e, "contact group", &name))
+            .map_err(|e| common::reclassify_not_found(e, "contact group", &name, "people"))
     }
 
     #[tool(
@@ -328,7 +336,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<PeopleModifyContactGroupMembersParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.resource_name, "resource_name")?;
+        common::ensure_non_empty(&p.resource_name, "resource_name", "people")?;
         if p.add.is_empty() && p.remove.is_empty() {
             return Err(
                 McpError::invalid_input("supply at least one of `add` or `remove`")
@@ -336,6 +344,7 @@ impl GoogleMcp {
                     .into(),
             );
         }
+        validate_group_member_counts(p.add.len(), p.remove.len())?;
         let client = self.people_for(&parts).await?;
         let name = group_resource_name(&p.resource_name);
         let add: Vec<String> = p.add.iter().map(|r| person_resource_name(r)).collect();
@@ -344,7 +353,7 @@ impl GoogleMcp {
             .modify_group_members(&name, &add, &remove)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_people_not_found(e, "contact group", &name))
+            .map_err(|e| common::reclassify_not_found(e, "contact group", &name, "people"))
     }
 }
 
@@ -358,22 +367,21 @@ impl GoogleMcp {
     }
 }
 
-fn reclassify_people_not_found(e: PeopleError, kind: &'static str, id: &str) -> ErrorData {
-    if let PeopleError::Api { status, .. } = &e
-        && status.as_u16() == 404
-    {
-        return McpError::not_found(kind, id, "people").into();
+/// Enforces People's documented 1000-entries-per-call cap on `add`/`remove`.
+fn validate_group_member_counts(add_len: usize, remove_len: usize) -> Result<(), ErrorData> {
+    if add_len > MAX_GROUP_MEMBERS_PER_CALL {
+        return Err(McpError::invalid_input(format!(
+            "`add` has {add_len} entries; People allows at most {MAX_GROUP_MEMBERS_PER_CALL} per call"
+        ))
+        .with_service("people")
+        .into());
     }
-    to_mcp(e)
-}
-
-fn ensure_non_empty(s: &str, field: &str) -> Result<(), ErrorData> {
-    if s.trim().is_empty() {
-        return Err(
-            McpError::invalid_input(format!("`{field}` must not be empty"))
-                .with_service("people")
-                .into(),
-        );
+    if remove_len > MAX_GROUP_MEMBERS_PER_CALL {
+        return Err(McpError::invalid_input(format!(
+            "`remove` has {remove_len} entries; People allows at most {MAX_GROUP_MEMBERS_PER_CALL} per call"
+        ))
+        .with_service("people")
+        .into());
     }
     Ok(())
 }
@@ -572,6 +580,23 @@ mod tests {
         let (body, mask) = build_person(&f).unwrap();
         assert_eq!(body["names"], json!([{ "givenName": "Raw" }]));
         assert_eq!(mask, "names", "etag must not appear in updatePersonFields");
+    }
+
+    #[test]
+    fn group_members_within_cap_ok() {
+        assert!(validate_group_member_counts(1000, 1000).is_ok());
+    }
+
+    #[test]
+    fn group_members_add_over_cap_rejected() {
+        let err = validate_group_member_counts(1001, 0).unwrap_err();
+        assert!(err.message.contains("`add`"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn group_members_remove_over_cap_rejected() {
+        let err = validate_group_member_counts(0, 1001).unwrap_err();
+        assert!(err.message.contains("`remove`"), "got: {}", err.message);
     }
 
     #[test]

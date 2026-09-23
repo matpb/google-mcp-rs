@@ -11,8 +11,12 @@ use reqwest::Method;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use super::http::{
+    InvalidPathSegment, MAX_API_RESPONSE_BYTES, MAX_DOWNLOAD_BYTES, ReadBodyError,
+    read_body_capped, seg,
+};
+
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum DriveError {
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
@@ -20,6 +24,25 @@ pub enum DriveError {
     Api { status: StatusCode, message: String },
     #[error("could not parse Drive response: {0}")]
     Parse(serde_json::Error),
+    #[error("invalid id: {0}")]
+    InvalidId(String),
+    #[error("response body exceeds the {cap}-byte cap (at least {actual} bytes)")]
+    TooLarge { cap: usize, actual: usize },
+}
+
+impl From<InvalidPathSegment> for DriveError {
+    fn from(e: InvalidPathSegment) -> Self {
+        DriveError::InvalidId(e.0)
+    }
+}
+
+impl From<ReadBodyError> for DriveError {
+    fn from(e: ReadBodyError) -> Self {
+        match e {
+            ReadBodyError::Http(e) => DriveError::Http(e),
+            ReadBodyError::TooLarge { cap, actual } => DriveError::TooLarge { cap, actual },
+        }
+    }
 }
 
 const BASE: &str = "https://www.googleapis.com/drive/v3";
@@ -88,6 +111,7 @@ impl DriveClient {
         fields: Option<&str>,
         supports_all_drives: bool,
     ) -> Result<Value, DriveError> {
+        let file_id = seg(file_id)?;
         let mut q: Vec<(String, String)> = vec![];
         q.push((
             "fields".into(),
@@ -139,6 +163,7 @@ impl DriveClient {
         add_parents: Option<&str>,
         remove_parents: Option<&str>,
     ) -> Result<Value, DriveError> {
+        let file_id = seg(file_id)?;
         let mut q: Vec<(String, String)> = vec![("fields".into(), DEFAULT_FILE_FIELDS.into())];
         q.push(("supportsAllDrives".into(), "true".into()));
         if let Some(a) = add_parents {
@@ -162,25 +187,29 @@ impl DriveClient {
         content: &[u8],
         content_mime: &str,
     ) -> Result<Value, DriveError> {
-        let url = format!(
-            "{UPLOAD_BASE}/files/{file_id}?uploadType=media&supportsAllDrives=true&fields={DEFAULT_FILE_FIELDS}"
-        );
+        let file_id = seg(file_id)?;
+        let url = format!("{UPLOAD_BASE}/files/{file_id}");
         let resp = self
             .http
             .request(Method::PATCH, &url)
+            .query(&[
+                ("uploadType", "media"),
+                ("supportsAllDrives", "true"),
+                ("fields", DEFAULT_FILE_FIELDS),
+            ])
             .bearer_auth(&self.access_token)
             .header(http::header::CONTENT_TYPE, content_mime)
             .body(content.to_vec())
             .send()
             .await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         if status.is_success() {
-            return serde_json::from_str(&text).map_err(DriveError::Parse);
+            return serde_json::from_slice(&bytes).map_err(DriveError::Parse);
         }
         Err(DriveError::Api {
             status,
-            message: text.chars().take(800).collect(),
+            message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
         })
     }
 
@@ -188,19 +217,21 @@ impl DriveClient {
     /// Returns `(content_type, bytes)`. For Google Docs/Sheets/Slides,
     /// use `export_file` instead — those have no underlying bytes.
     pub async fn download_file(&self, file_id: &str) -> Result<(String, Vec<u8>), DriveError> {
-        let url = format!("{BASE}/files/{file_id}?alt=media&supportsAllDrives=true");
+        let file_id = seg(file_id)?;
+        let url = format!("{BASE}/files/{file_id}");
         let resp = self
             .http
             .get(&url)
+            .query(&[("alt", "media"), ("supportsAllDrives", "true")])
             .bearer_auth(&self.access_token)
             .send()
             .await?;
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await?;
+            let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
             return Err(DriveError::Api {
                 status,
-                message: text.chars().take(800).collect(),
+                message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
             });
         }
         let ct = resp
@@ -209,7 +240,7 @@ impl DriveClient {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_string();
-        let bytes = resp.bytes().await?.to_vec();
+        let bytes = read_body_capped(resp, MAX_DOWNLOAD_BYTES).await?;
         Ok((ct, bytes))
     }
 
@@ -220,22 +251,21 @@ impl DriveClient {
         file_id: &str,
         export_mime: &str,
     ) -> Result<(String, Vec<u8>), DriveError> {
-        let url = format!(
-            "{BASE}/files/{file_id}/export?mimeType={}",
-            urlencoded(export_mime)
-        );
+        let file_id = seg(file_id)?;
+        let url = format!("{BASE}/files/{file_id}/export");
         let resp = self
             .http
             .get(&url)
+            .query(&[("mimeType", export_mime)])
             .bearer_auth(&self.access_token)
             .send()
             .await?;
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await?;
+            let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
             return Err(DriveError::Api {
                 status,
-                message: text.chars().take(800).collect(),
+                message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
             });
         }
         let ct = resp
@@ -244,11 +274,12 @@ impl DriveClient {
             .and_then(|v| v.to_str().ok())
             .unwrap_or(export_mime)
             .to_string();
-        let bytes = resp.bytes().await?.to_vec();
+        let bytes = read_body_capped(resp, MAX_DOWNLOAD_BYTES).await?;
         Ok((ct, bytes))
     }
 
     pub async fn copy_file(&self, file_id: &str, metadata: &Value) -> Result<Value, DriveError> {
+        let file_id = seg(file_id)?;
         let q = vec![
             ("fields".to_string(), DEFAULT_FILE_FIELDS.to_string()),
             ("supportsAllDrives".to_string(), "true".to_string()),
@@ -269,10 +300,12 @@ impl DriveClient {
     }
 
     pub async fn delete_permanent(&self, file_id: &str) -> Result<Value, DriveError> {
-        let url = format!("{BASE}/files/{file_id}?supportsAllDrives=true");
+        let file_id = seg(file_id)?;
+        let url = format!("{BASE}/files/{file_id}");
         let resp = self
             .http
             .delete(&url)
+            .query(&[("supportsAllDrives", "true")])
             .bearer_auth(&self.access_token)
             .send()
             .await?;
@@ -280,10 +313,10 @@ impl DriveClient {
         if status.is_success() {
             return Ok(json!({"ok": true}));
         }
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         Err(DriveError::Api {
             status,
-            message: text.chars().take(800).collect(),
+            message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
         })
     }
 
@@ -297,6 +330,7 @@ impl DriveClient {
         send_notification_email: bool,
         email_message: Option<&str>,
     ) -> Result<Value, DriveError> {
+        let file_id = seg(file_id)?;
         let mut q: Vec<(String, String)> = vec![
             (
                 "sendNotificationEmail".into(),
@@ -317,6 +351,7 @@ impl DriveClient {
     }
 
     pub async fn list_permissions(&self, file_id: &str) -> Result<Value, DriveError> {
+        let file_id = seg(file_id)?;
         let q = vec![
             ("supportsAllDrives".to_string(), "true".to_string()),
             (
@@ -338,11 +373,13 @@ impl DriveClient {
         file_id: &str,
         permission_id: &str,
     ) -> Result<Value, DriveError> {
-        let url =
-            format!("{BASE}/files/{file_id}/permissions/{permission_id}?supportsAllDrives=true");
+        let file_id = seg(file_id)?;
+        let permission_id = seg(permission_id)?;
+        let url = format!("{BASE}/files/{file_id}/permissions/{permission_id}");
         let resp = self
             .http
             .delete(&url)
+            .query(&[("supportsAllDrives", "true")])
             .bearer_auth(&self.access_token)
             .send()
             .await?;
@@ -350,10 +387,10 @@ impl DriveClient {
         if status.is_success() {
             return Ok(json!({"ok": true}));
         }
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         Err(DriveError::Api {
             status,
-            message: text.chars().take(800).collect(),
+            message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
         })
     }
 
@@ -384,16 +421,16 @@ impl DriveClient {
         }
         let resp = req.send().await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         if status.is_success() {
-            if text.is_empty() {
+            if bytes.is_empty() {
                 return Ok(json!({}));
             }
-            return serde_json::from_str(&text).map_err(DriveError::Parse);
+            return serde_json::from_slice(&bytes).map_err(DriveError::Parse);
         }
         Err(DriveError::Api {
             status,
-            message: text.chars().take(800).collect(),
+            message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
         })
     }
 
@@ -432,17 +469,13 @@ impl DriveClient {
             .send()
             .await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         if status.is_success() {
-            return serde_json::from_str(&text).map_err(DriveError::Parse);
+            return serde_json::from_slice(&bytes).map_err(DriveError::Parse);
         }
         Err(DriveError::Api {
             status,
-            message: text.chars().take(800).collect(),
+            message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
         })
     }
-}
-
-fn urlencoded(s: &str) -> String {
-    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }

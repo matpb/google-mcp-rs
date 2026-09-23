@@ -5,6 +5,7 @@ mod domain;
 mod errors;
 mod files;
 mod google;
+mod host_guard;
 mod local_auth;
 mod mcp;
 mod mime;
@@ -36,9 +37,11 @@ use mcp::server::GoogleMcp;
 use oauth::google::GoogleOAuthClient;
 use oauth::proxy;
 use state::{AppState, Tenancy};
-use storage::{Db, accounts, codes::sweep_expired};
+use storage::{Db, accounts, clients, codes::sweep_expired};
+use tower_http::cors::AllowOrigin;
 
-const USAGE: &str = "usage: google-mcp [http|stdio|auth|version|help]";
+const USAGE: &str =
+    "usage: google-mcp [http|stdio|auth|accounts list|accounts revoke <email-or-sub>|version|help]";
 
 #[tokio::main]
 async fn main() {
@@ -51,10 +54,11 @@ async fn main() {
         None | Some("http") => run_http().await,
         Some("stdio") => run_stdio().await,
         Some("auth") => run_auth().await,
-        Some("version") | Some("--version") | Some("-V") => {
+        Some("accounts") => run_accounts(std::env::args().skip(2).collect()).await,
+        Some("version" | "--version" | "-V") => {
             println!("google-mcp {}", env!("CARGO_PKG_VERSION"));
         }
-        Some("help") | Some("--help") | Some("-h") => println!("{USAGE}"),
+        Some("help" | "--help" | "-h") => println!("{USAGE}"),
         Some(other) => {
             eprintln!("unknown subcommand `{other}`. {USAGE}");
             std::process::exit(2);
@@ -149,6 +153,7 @@ fn ensure_local_secrets() -> Result<(), String> {
     // writes the environment. This runs at the top of the chosen subcommand,
     // before any task or client has been spawned, so the tokio workers are
     // parked and nothing else touches the environment.
+    #[allow(unsafe_code)]
     unsafe {
         if env_jwt.is_none() {
             std::env::set_var("JWT_SECRET", &jwt);
@@ -165,17 +170,15 @@ fn optional_env(key: &str) -> Option<String> {
 }
 
 fn random_hex_64() -> String {
-    use rand::RngCore;
     let mut b = [0u8; 64];
-    rand::rngs::OsRng.fill_bytes(&mut b);
+    getrandom::fill(&mut b).expect("OS RNG failure");
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 fn random_storage_key() -> String {
     use base64::Engine;
-    use rand::RngCore;
     let mut b = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut b);
+    getrandom::fill(&mut b).expect("OS RNG failure");
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
@@ -249,6 +252,7 @@ async fn run_http() {
         db.clone(),
         Arc::clone(&google_oauth),
         cfg.storage_encryption_key,
+        cfg.allowed_google_accounts.clone(),
     );
 
     let state = AppState {
@@ -304,6 +308,7 @@ async fn run_stdio() {
         db.clone(),
         Arc::clone(&google_oauth),
         cfg.storage_encryption_key,
+        cfg.allowed_google_accounts.clone(),
     );
 
     let sub = match accounts::latest_google_sub(&db).await {
@@ -392,11 +397,117 @@ async fn run_auth() {
 }
 
 // ---------------------------------------------------------------------------
+// accounts subcommand — works alongside a running server (SQLite WAL).
+// ---------------------------------------------------------------------------
+
+async fn run_accounts(args: Vec<String>) {
+    init_tracing(true);
+    let _ = dotenvy::dotenv();
+    if let Err(e) = ensure_local_secrets() {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
+    let cfg = load_config();
+    let db = open_database(&cfg).await;
+    match args.first().map(String::as_str) {
+        Some("list") => accounts_list(&db).await,
+        Some("revoke") => match args.get(1) {
+            Some(target) => accounts_revoke(&cfg, &db, target).await,
+            None => {
+                eprintln!("usage: google-mcp accounts revoke <email-or-sub>");
+                std::process::exit(2);
+            }
+        },
+        _ => {
+            eprintln!("usage: google-mcp accounts [list|revoke <email-or-sub>]");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn fmt_unix(secs: i64) -> String {
+    let fmt = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]");
+    time::OffsetDateTime::from_unix_timestamp(secs)
+        .ok()
+        .and_then(|t| t.format(&fmt).ok())
+        .unwrap_or_else(|| secs.to_string())
+}
+
+async fn accounts_list(db: &Db) {
+    match accounts::list_all(db).await {
+        Ok(rows) => {
+            println!(
+                "{:<24} {:<32} {:<17} {:<17} {:<17}",
+                "sub", "email", "created (UTC)", "updated (UTC)", "last refresh (UTC)"
+            );
+            for a in rows {
+                println!(
+                    "{:<24} {:<32} {:<17} {:<17} {:<17}",
+                    a.google_sub,
+                    a.email,
+                    fmt_unix(a.created_at),
+                    fmt_unix(a.updated_at),
+                    a.last_refresh_at.map_or_else(|| "-".to_string(), fmt_unix)
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("could not list accounts: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn accounts_revoke(cfg: &ServerConfig, db: &Db, target: &str) {
+    let account = match accounts::find_by_email_or_sub(db, target).await {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            eprintln!("no account found matching `{target}`");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("lookup failed: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let now = storage::now_secs();
+    if let Err(e) = storage::revocations::revoke(db, &account.google_sub, now).await {
+        eprintln!("could not write revocation tombstone: {e}");
+        std::process::exit(1);
+    }
+    println!(
+        "tombstoned sub={} (JWTs issued before now are now invalid)",
+        account.google_sub
+    );
+
+    match accounts::get_refresh_token(db, &cfg.storage_encryption_key, &account.google_sub).await {
+        Ok(Some(rt)) => {
+            let http = google_http::build();
+            match oauth::google::revoke_token(&http, &rt).await {
+                Ok(()) => println!("revoked refresh token with Google"),
+                Err(e) => eprintln!("warning: Google revoke call failed (best-effort): {e}"),
+            }
+        }
+        Ok(None) => eprintln!("warning: no refresh token stored to revoke with Google"),
+        Err(e) => eprintln!("warning: could not decrypt refresh token: {e}"),
+    }
+
+    if let Err(e) = accounts::delete(db, &account.google_sub).await {
+        eprintln!("could not delete account row: {e}");
+        std::process::exit(1);
+    }
+    println!("deleted account row for {}", account.email);
+}
+
+// ---------------------------------------------------------------------------
 // Shared HTTP wiring (used by run_http).
 // ---------------------------------------------------------------------------
 
 fn build_router(state: AppState) -> Router {
     let cors = build_cors(&state.config);
+    let allowed_hosts =
+        host_guard::allowed_host_strings(&state.config.base_url, &state.config.allowed_hosts);
 
     // rmcp Streamable HTTP service. The factory closure is invoked once
     // per session; we hand each one its own GoogleMcp pointing at the
@@ -406,6 +517,7 @@ fn build_router(state: AppState) -> Router {
     let mut mcp_config = StreamableHttpServerConfig::default();
     mcp_config.stateful_mode = false;
     mcp_config.json_response = true;
+    mcp_config = mcp_config.with_allowed_hosts(allowed_hosts);
     let mcp_service = StreamableHttpService::new(
         move || Ok(GoogleMcp::new(mcp_state.clone())),
         Arc::new(NeverSessionManager::default()),
@@ -419,8 +531,9 @@ fn build_router(state: AppState) -> Router {
             auth_gate::require_bearer,
         ));
 
-    Router::new()
-        .route("/health", routing::get(health))
+    // Every route except /health is behind the Host allowlist — a wildcard
+    // Host used against DNS rebinding could otherwise reach OAuth endpoints.
+    let guarded = Router::new()
         .route(
             "/.well-known/oauth-authorization-server",
             routing::get(proxy::authorization_server_metadata),
@@ -436,11 +549,23 @@ fn build_router(state: AppState) -> Router {
         .route("/oauth/register", routing::post(proxy::register))
         .route("/authorize", routing::get(proxy::authorize))
         .route(
+            "/authorize/consent",
+            routing::post(proxy::authorize_consent),
+        )
+        .route(
             "/oauth/google/callback",
             routing::get(proxy::google_callback),
         )
         .route("/oauth/token", routing::post(proxy::token))
         .merge(mcp_routes)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            host_guard::check_host,
+        ));
+
+    Router::new()
+        .route("/health", routing::get(health))
+        .merge(guarded)
         .with_state(state)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
@@ -454,8 +579,11 @@ fn build_cors(cfg: &ServerConfig) -> CorsLayer {
         HeaderName::from_static("mcp-protocol-version"),
     ]);
     if cfg.cors_allow_localhost {
-        // Permissive for dev — origins can include arbitrary localhost ports.
-        layer = layer.allow_origin(Any);
+        // Dev-only: any localhost/127.0.0.1/[::1] origin, any scheme/port —
+        // never `Any`, which would also allow arbitrary third-party origins.
+        layer = layer.allow_origin(AllowOrigin::predicate(|origin, _| {
+            is_loopback_origin(origin)
+        }));
     } else {
         // Production: only Claude.ai/Claude.com origins.
         let origins = ["https://claude.ai", "https://claude.com"];
@@ -466,6 +594,19 @@ fn build_cors(cfg: &ServerConfig) -> CorsLayer {
         layer = layer.allow_origin(parsed);
     }
     layer
+}
+
+fn is_loopback_origin(origin: &http::HeaderValue) -> bool {
+    origin
+        .to_str()
+        .ok()
+        .and_then(|s| url::Url::parse(s).ok())
+        .is_some_and(|u| {
+            matches!(
+                u.host_str(),
+                Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+            )
+        })
 }
 
 async fn health() -> impl IntoResponse {
@@ -483,6 +624,196 @@ fn spawn_oauth_state_sweeper(db: Db) {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(err = ?e, "sweep_expired failed"),
             }
+            match clients::delete_stale_unused(&db, 24 * 3600).await {
+                Ok(n) if n > 0 => tracing::debug!("swept {n} stale unused mcp_clients rows"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(err = ?e, "delete_stale_unused failed"),
+            }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use http::{HeaderValue, Request};
+    use tower::ServiceExt;
+
+    #[test]
+    fn loopback_origin_accepted() {
+        assert!(is_loopback_origin(&HeaderValue::from_static(
+            "http://localhost:5173"
+        )));
+        assert!(is_loopback_origin(&HeaderValue::from_static(
+            "http://127.0.0.1:3000"
+        )));
+    }
+
+    #[test]
+    fn non_loopback_origin_rejected() {
+        assert!(!is_loopback_origin(&HeaderValue::from_static(
+            "https://evil.example"
+        )));
+    }
+
+    async fn test_state(base_url: &str, allowed_hosts: Vec<String>) -> AppState {
+        let db = Db::open_in_memory().await.expect("open in-memory db");
+        let http = Arc::new(reqwest::Client::new());
+        let google_oauth = Arc::new(GoogleOAuthClient::new(
+            "test-cid",
+            "test-csecret",
+            format!("{base_url}/oauth/google/callback"),
+            domain::google_scopes(&[domain::Domain::Gmail]),
+            (*http).clone(),
+        ));
+        let session_cache =
+            SessionCache::new(db.clone(), Arc::clone(&google_oauth), [0u8; 32], vec![]);
+        let config = Arc::new(ServerConfig {
+            host: "127.0.0.1".parse().unwrap(),
+            port: 8433,
+            base_url: base_url.to_string(),
+            google_client_id: "test-cid".to_string(),
+            google_client_secret: "test-csecret".to_string(),
+            jwt_secret: vec![0u8; 32],
+            storage_encryption_key: [0u8; 32],
+            database_url: ":memory:".to_string(),
+            cors_allow_localhost: true,
+            allowed_hosts,
+            enabled_domains: vec![domain::Domain::Gmail],
+            allowed_google_accounts: vec![],
+            file_jail: None,
+            file_maintenance: files::FileMaintenance::Off,
+        });
+        AppState {
+            config,
+            db,
+            http,
+            google_oauth,
+            session_cache,
+            tenancy: Tenancy::MultiTenant,
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_with_garbage_bearer_is_401_invalid_token() {
+        let state = test_state("http://localhost:8433", vec![]).await;
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(http::header::HOST, "localhost:8433")
+            .header(http::header::AUTHORIZATION, "Bearer garbage")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let challenge = resp
+            .headers()
+            .get(http::header::WWW_AUTHENTICATE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(challenge.contains(r#"error="invalid_token""#));
+    }
+
+    #[tokio::test]
+    async fn well_known_with_evil_host_is_403() {
+        let state = test_state("http://localhost:8433", vec![]).await;
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/.well-known/oauth-authorization-server")
+            .header(http::header::HOST, "evil.example")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn well_known_with_allowed_host_but_evil_forwarded_host_is_403() {
+        let state = test_state("http://localhost:8433", vec![]).await;
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/.well-known/oauth-authorization-server")
+            .header(http::header::HOST, "localhost:8433")
+            .header("x-forwarded-host", "evil.example")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn authorize_on_non_base_host_redirects_to_base_url_with_same_query() {
+        let state = test_state("http://localhost:8433", vec!["evil.example".to_string()]).await;
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/authorize?response_type=code&client_id=x&redirect_uri=https%3A%2F%2Fx%2Fcb&code_challenge=a&code_challenge_method=S256")
+            .header(http::header::HOST, "evil.example")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let loc = resp
+            .headers()
+            .get(http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(loc.starts_with("http://localhost:8433/authorize?"));
+        assert!(loc.contains("client_id=x"));
+    }
+
+    #[tokio::test]
+    async fn revoked_token_is_401_invalid_token() {
+        let state = test_state("http://localhost:8433", vec![]).await;
+        let now = oauth::jwt::now_secs();
+        let claims = oauth::jwt::Claims {
+            iss: "http://localhost:8433".to_string(),
+            sub: "sub-revoked".to_string(),
+            iat: now,
+            exp: now + 3600,
+            aud: "http://localhost:8433/mcp".to_string(),
+        };
+        let jwt = oauth::jwt::sign(&state.config.jwt_secret, &claims).unwrap();
+        storage::revocations::revoke(&state.db, "sub-revoked", (now + 1) as i64)
+            .await
+            .unwrap();
+
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(http::header::HOST, "localhost:8433")
+            .header(http::header::AUTHORIZATION, format!("Bearer {jwt}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let challenge = resp
+            .headers()
+            .get(http::header::WWW_AUTHENTICATE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(challenge.contains("token revoked"));
+    }
+
+    #[tokio::test]
+    async fn health_ignores_host_allowlist() {
+        let state = test_state("http://localhost:8433", vec![]).await;
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .header(http::header::HOST, "10.0.0.5")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }

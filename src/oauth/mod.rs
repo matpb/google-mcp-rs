@@ -1,6 +1,7 @@
 //! OAuth 2.1 — server-side proxy that wraps Google for upstream auth and
 //! issues MCP-bound JWTs to MCP clients.
 
+pub mod consent;
 pub mod google;
 pub mod jwt;
 pub mod pkce;
@@ -10,10 +11,14 @@ use reqwest::StatusCode as ReqwestStatus;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JwtError {
-    #[error("sign: {0}")]
-    Sign(jsonwebtoken::errors::Error),
-    #[error("verify: {0}")]
-    Verify(jsonwebtoken::errors::Error),
+    #[error("failed to sign JWT")]
+    Sign,
+    #[error("malformed token")]
+    Malformed,
+    #[error("invalid signature")]
+    BadSignature,
+    #[error("token expired")]
+    Expired,
     #[error("audience mismatch")]
     AudienceMismatch,
 }
@@ -40,6 +45,19 @@ pub enum GoogleOAuthError {
     },
     #[error("id token parse: {0}")]
     IdToken(String),
+    #[error("response body exceeds the {cap}-byte cap (at least {actual} bytes)")]
+    TooLarge { cap: usize, actual: usize },
+}
+
+impl From<crate::google::http::ReadBodyError> for GoogleOAuthError {
+    fn from(e: crate::google::http::ReadBodyError) -> Self {
+        match e {
+            crate::google::http::ReadBodyError::Http(e) => GoogleOAuthError::Http(e),
+            crate::google::http::ReadBodyError::TooLarge { cap, actual } => {
+                GoogleOAuthError::TooLarge { cap, actual }
+            }
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize)]

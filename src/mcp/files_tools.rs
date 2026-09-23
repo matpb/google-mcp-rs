@@ -15,6 +15,9 @@ use crate::files::{FileJail, plan_delete};
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
 
+/// Default number of listed entries when `limit` is omitted.
+const DEFAULT_LISTING_LIMIT: usize = 100;
+
 #[tool_router(router = files_info_router, vis = "pub(crate)")]
 impl GoogleMcp {
     #[tool(
@@ -31,15 +34,14 @@ impl GoogleMcp {
         let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
         let total_files = entries.len();
         let now = std::time::SystemTime::now();
-        let limit = p.limit.unwrap_or(100) as usize;
+        let limit = p.limit.unwrap_or(DEFAULT_LISTING_LIMIT as u32) as usize;
         let files: Vec<Value> = entries
             .iter()
             .take(limit)
             .map(|e| {
                 let age_hours = now
                     .duration_since(e.modified)
-                    .map(|d| d.as_secs_f64() / 3600.0)
-                    .unwrap_or(0.0);
+                    .map_or(0.0, |d| d.as_secs_f64() / 3600.0);
                 json!({
                     "path": e.path.display().to_string(),
                     "sizeBytes": e.size,
@@ -74,7 +76,7 @@ impl GoogleMcp {
         let jail = self.file_jail()?;
         let entries = jail.scan().map_err(crate::errors::to_mcp)?;
         let now = std::time::SystemTime::now();
-        let older_than_secs = p.older_than_hours.map(|h| (h * 3600.0).max(0.0) as u64);
+        let older_than_secs = p.older_than_hours.map(older_than_hours_to_secs);
         let selected = plan_delete(&entries, now, older_than_secs, p.name_contains.as_deref());
 
         let selected_bytes: u64 = selected.iter().map(|e| e.size).sum();
@@ -120,8 +122,14 @@ impl GoogleMcp {
     }
 }
 
+/// Converts hours to seconds for the cleanup age filter. Negative and NaN
+/// clamp to 0 (no age filter); values too large to fit saturate to `u64::MAX`.
+fn older_than_hours_to_secs(h: f64) -> u64 {
+    (h * 3600.0).max(0.0) as u64
+}
+
 impl GoogleMcp {
-    /// The configured file-exchange jail, or a clear error when FILE_ROOT is
+    /// The configured file-exchange jail, or a clear error when `FILE_ROOT` is
     /// unset. (The files tools are only routed when enabled, so this is
     /// belt-and-suspenders.)
     fn file_jail(&self) -> Result<&FileJail, ErrorData> {
@@ -129,5 +137,32 @@ impl GoogleMcp {
             McpError::invalid_input("file-exchange is disabled on this server (FILE_ROOT unset)")
                 .into()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_than_hours_negative_clamps_to_zero() {
+        assert_eq!(older_than_hours_to_secs(-5.0), 0);
+    }
+
+    #[test]
+    fn older_than_hours_nan_clamps_to_zero() {
+        assert_eq!(older_than_hours_to_secs(f64::NAN), 0);
+    }
+
+    #[test]
+    fn older_than_hours_huge_saturates() {
+        assert_eq!(older_than_hours_to_secs(f64::MAX), u64::MAX);
+        assert_eq!(older_than_hours_to_secs(f64::INFINITY), u64::MAX);
+    }
+
+    #[test]
+    fn older_than_hours_normal_value() {
+        assert_eq!(older_than_hours_to_secs(1.0), 3600);
+        assert_eq!(older_than_hours_to_secs(0.5), 1800);
     }
 }

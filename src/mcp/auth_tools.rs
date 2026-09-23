@@ -56,9 +56,11 @@ impl GoogleMcp {
                 } else {
                     outcome.email.clone()
                 };
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                    format!("Connected {who}. Your Google Workspace tools are ready to use."),
-                )]))
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(format!(
+                        "Connected {who}. Your Google Workspace tools are ready to use."
+                    )),
+                ]))
             }
             Err(e) => Err(McpError::internal(format!("Google sign-in failed: {e}")).into()),
         }

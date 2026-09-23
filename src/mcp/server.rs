@@ -106,14 +106,20 @@ impl GoogleMcp {
                 }
             }
             // HTTP: identity from the per-request bearer JWT.
-            Tenancy::MultiTenant => resolve_google(
-                parts,
-                &self.state.config.jwt_secret,
-                &self.state.config.base_url,
-                &self.state.session_cache,
-            )
-            .await
-            .map_err(to_mcp),
+            Tenancy::MultiTenant => {
+                let allowed_hosts = crate::host_guard::build_allowed_hosts(
+                    &self.state.config.base_url,
+                    &self.state.config.allowed_hosts,
+                );
+                resolve_google(
+                    parts,
+                    &self.state.config.jwt_secret,
+                    &allowed_hosts,
+                    &self.state.session_cache,
+                )
+                .await
+                .map_err(to_mcp)
+            }
         }
     }
 
@@ -152,7 +158,8 @@ mod harness {
             domain::google_scopes(&enabled_domains),
             (*http).clone(),
         ));
-        let session_cache = SessionCache::new(db.clone(), Arc::clone(&google_oauth), [0u8; 32]);
+        let session_cache =
+            SessionCache::new(db.clone(), Arc::clone(&google_oauth), [0u8; 32], vec![]);
         let config = Arc::new(ServerConfig {
             host: "127.0.0.1".parse().expect("ip"),
             port: 8433,
@@ -163,7 +170,9 @@ mod harness {
             storage_encryption_key: [0u8; 32],
             database_url: ":memory:".to_string(),
             cors_allow_localhost: false,
+            allowed_hosts: Vec::new(),
             enabled_domains,
+            allowed_google_accounts: vec![],
             file_jail: None,
             file_maintenance: crate::files::FileMaintenance::Off,
         });
@@ -207,7 +216,9 @@ mod harness {
             storage_encryption_key: [0u8; 32],
             database_url: ":memory:".to_string(),
             cors_allow_localhost: false,
+            allowed_hosts: Vec::new(),
             enabled_domains,
+            allowed_google_accounts: vec![],
             file_jail: Some(jail),
             file_maintenance: maintenance,
         };

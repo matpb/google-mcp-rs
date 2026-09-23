@@ -6,8 +6,11 @@ use reqwest::Method;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::http::{
+    InvalidPathSegment, MAX_API_RESPONSE_BYTES, ReadBodyError, read_body_capped, seg,
+};
+
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum SearchConsoleError {
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
@@ -15,6 +18,25 @@ pub enum SearchConsoleError {
     Api { status: StatusCode, message: String },
     #[error("could not parse Search Console response: {0}")]
     Parse(serde_json::Error),
+    #[error("invalid id: {0}")]
+    InvalidId(String),
+    #[error("response body exceeds the {cap}-byte cap (at least {actual} bytes)")]
+    TooLarge { cap: usize, actual: usize },
+}
+
+impl From<InvalidPathSegment> for SearchConsoleError {
+    fn from(e: InvalidPathSegment) -> Self {
+        SearchConsoleError::InvalidId(e.0)
+    }
+}
+
+impl From<ReadBodyError> for SearchConsoleError {
+    fn from(e: ReadBodyError) -> Self {
+        match e {
+            ReadBodyError::Http(e) => SearchConsoleError::Http(e),
+            ReadBodyError::TooLarge { cap, actual } => SearchConsoleError::TooLarge { cap, actual },
+        }
+    }
 }
 
 const V3: &str = "https://www.googleapis.com/webmasters/v3";
@@ -24,10 +46,6 @@ const INSPECT_URL: &str = "https://searchconsole.googleapis.com/v1/urlInspection
 pub struct SearchConsoleClient {
     http: reqwest::Client,
     access_token: String,
-}
-
-fn seg(s: &str) -> String {
-    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
 }
 
 impl SearchConsoleClient {
@@ -44,9 +62,10 @@ impl SearchConsoleClient {
     }
 
     pub async fn get_site(&self, site_url: &str) -> Result<Value, SearchConsoleError> {
+        let site_url = seg(site_url)?;
         self.request(
             Method::GET,
-            format!("{V3}/sites/{}", seg(site_url)),
+            format!("{V3}/sites/{site_url}"),
             None::<&()>,
             &[],
         )
@@ -58,13 +77,14 @@ impl SearchConsoleClient {
         site_url: &str,
         sitemap_index: Option<&str>,
     ) -> Result<Value, SearchConsoleError> {
+        let site_url = seg(site_url)?;
         let mut q: Vec<(String, String)> = vec![];
         if let Some(i) = sitemap_index {
             q.push(("sitemapIndex".into(), i.into()));
         }
         self.request(
             Method::GET,
-            format!("{V3}/sites/{}/sitemaps", seg(site_url)),
+            format!("{V3}/sites/{site_url}/sitemaps"),
             None::<&()>,
             &q,
         )
@@ -76,9 +96,11 @@ impl SearchConsoleClient {
         site_url: &str,
         feedpath: &str,
     ) -> Result<Value, SearchConsoleError> {
+        let site_url = seg(site_url)?;
+        let feedpath = seg(feedpath)?;
         self.request(
             Method::GET,
-            format!("{V3}/sites/{}/sitemaps/{}", seg(site_url), seg(feedpath)),
+            format!("{V3}/sites/{site_url}/sitemaps/{feedpath}"),
             None::<&()>,
             &[],
         )
@@ -90,9 +112,11 @@ impl SearchConsoleClient {
         site_url: &str,
         feedpath: &str,
     ) -> Result<Value, SearchConsoleError> {
+        let site_url = seg(site_url)?;
+        let feedpath = seg(feedpath)?;
         self.request(
             Method::PUT,
-            format!("{V3}/sites/{}/sitemaps/{}", seg(site_url), seg(feedpath)),
+            format!("{V3}/sites/{site_url}/sitemaps/{feedpath}"),
             None::<&()>,
             &[],
         )
@@ -104,9 +128,11 @@ impl SearchConsoleClient {
         site_url: &str,
         feedpath: &str,
     ) -> Result<Value, SearchConsoleError> {
+        let site_url = seg(site_url)?;
+        let feedpath = seg(feedpath)?;
         self.request(
             Method::DELETE,
-            format!("{V3}/sites/{}/sitemaps/{}", seg(site_url), seg(feedpath)),
+            format!("{V3}/sites/{site_url}/sitemaps/{feedpath}"),
             None::<&()>,
             &[],
         )
@@ -118,9 +144,10 @@ impl SearchConsoleClient {
         site_url: &str,
         body: &Value,
     ) -> Result<Value, SearchConsoleError> {
+        let site_url = seg(site_url)?;
         self.request(
             Method::POST,
-            format!("{V3}/sites/{}/searchAnalytics/query", seg(site_url)),
+            format!("{V3}/sites/{site_url}/searchAnalytics/query"),
             Some(body),
             &[],
         )
@@ -155,16 +182,16 @@ impl SearchConsoleClient {
         }
         let resp = req.send().await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         if status.is_success() {
-            if text.is_empty() {
+            if bytes.is_empty() {
                 return Ok(serde_json::json!({}));
             }
-            return serde_json::from_str(&text).map_err(SearchConsoleError::Parse);
+            return serde_json::from_slice(&bytes).map_err(SearchConsoleError::Parse);
         }
         Err(SearchConsoleError::Api {
             status,
-            message: text.chars().take(800).collect(),
+            message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
         })
     }
 }
@@ -175,9 +202,9 @@ mod tests {
 
     #[test]
     fn encodes_site_url_as_one_path_segment() {
-        assert!(!seg("sc-domain:example.com").contains(':'));
-        let encoded = seg("https://example.com/");
+        assert!(!seg("sc-domain:example.com").unwrap().contains(':'));
+        let encoded = seg("https://example.com/").unwrap();
         assert!(!encoded.contains('/'));
-        assert_eq!(encoded, "https%3A%2F%2Fexample%2Ecom%2F");
+        assert_eq!(encoded, "https%3A%2F%2Fexample.com%2F");
     }
 }

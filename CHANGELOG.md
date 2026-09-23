@@ -5,6 +5,134 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.0.0] - 2026-09-23
+
+First stable release. No tool-surface changes since 0.12.0 (still 113 domain
+tools) — this release is entirely about hardening the OAuth/HTTP surface for
+running this server beyond a single trusted workstation, plus release and
+supply-chain housekeeping.
+
+### Added
+
+- **Consent screen.** `/authorize` now shows a server-rendered approval page
+  before redirecting to Google: the connecting client's self-reported name
+  (labeled as unverified), where access will be sent, and the Google scopes
+  about to be requested. Approval is bound to the browser with a per-flow
+  `HttpOnly` cookie, so an attacker cannot get a victim's browser to approve a
+  flow it didn't start. A request to `/authorize` on a host other than
+  `BASE_URL` is redirected to `BASE_URL` first. Denying returns
+  `error=access_denied`. State TTL is 10 minutes.
+- **Account revocation.** `google-mcp accounts list` and
+  `google-mcp accounts revoke <email-or-sub>` (works against a running server;
+  SQLite WAL). Revoking writes a tombstone that invalidates every JWT issued
+  for that account — even ones that haven't expired — then best-effort revokes
+  the refresh token with Google and deletes the stored account row. Works
+  through Docker too: `docker exec google-mcp google-mcp accounts list`.
+- **Optional account allowlist**, `ALLOWED_GOOGLE_ACCOUNTS` — exact emails or
+  `@domain` entries (matched against Google's `hd` claim, which requires a
+  verified email). Enforced at first sign-in and on every subsequent request.
+  Unset means unrestricted, same as before.
+- **Host allowlist**, `ALLOWED_HOSTS` — every route except `/health` now
+  validates `Host`/`X-Forwarded-Host` against loopback names, `BASE_URL`'s own
+  host, and this operator-supplied list, mitigating DNS rebinding. Also
+  extends the RFC 8707 `aud`/`resource` allowlist.
+- CI now runs a `cargo audit` job and an MSRV check pinned to
+  `rust-version` in `Cargo.toml`, and Dependabot watches Cargo, GitHub
+  Actions, and Docker base images.
+- `SECURITY.md` and `CONTRIBUTING.md`.
+
+### Changed
+
+- **Bearer tokens are now fully verified at the `/mcp` gate** — signature,
+  expiry, and audience — before any tool handler runs. An invalid or expired
+  token now returns `401` with
+  `WWW-Authenticate: Bearer error="invalid_token"`, so well-behaved MCP
+  clients re-authenticate automatically instead of getting a confusing
+  downstream error.
+- **RFC 8707 `resource` is now validated at `/oauth/token`**; a resource
+  outside the host allowlist is rejected with `invalid_target`.
+- **Dynamic client registration is stricter**: redirect URIs are parsed (not
+  string-matched) and must carry no userinfo or fragment, and be `https` or
+  loopback `http` (plus Cursor's private-use scheme); registrations are
+  size-limited and capped at 10,000 rows; client registrations unused for 24
+  hours are pruned automatically; new client secrets are hashed with SHA-256
+  instead of Argon2id (cheaper, since these are high-entropy random secrets,
+  not user passwords — legacy Argon2id hashes from earlier registrations
+  still verify).
+- **Google ID token claims are now checked** (issuer, audience, expiry)
+  instead of trusting the TLS channel alone.
+- `CORS_ALLOW_LOCALHOST=true` now allows loopback *origins* only (any
+  scheme/port on `localhost`/`127.0.0.1`/`::1`), not an unrestricted allowlist.
+- Outgoing email is validated before send: addresses, display names, and
+  subjects are checked, attachment filenames with control characters are
+  rejected, and malformed upstream `Message-Id`/`References` headers are
+  dropped from reply threading instead of being echoed back malformed.
+- Every caller-supplied resource ID (message, thread, file, event, contact,
+  sitemap, etc.) is now percent-encoded as a single URL path segment and dot
+  segments are rejected — this also **fixes** IDs that previously broke when
+  they contained `#`, `?`, or spaces (e.g. some holiday-calendar IDs, sheet
+  names with spaces).
+- Response bodies are capped at 64 MiB (Google API responses) and 256 MiB
+  (downloads), and Drive uploads at 256 MiB, so one oversized file can no
+  longer exhaust the server's memory.
+- File-exchange writes are now atomic (temp file + rename) and never follow a
+  symlink at the destination or create directories outside `FILE_ROOT`.
+- `gmail_download_attachment` now rejects `dest_path` and `to_drive_folder_id`
+  supplied together (they were silently ambiguous before).
+- People group membership changes are capped at 1000 contacts per call.
+- Search Console's `hour` dimension now requires `data_state=hourly_all`,
+  matching Google's own API requirement, instead of returning an opaque
+  upstream error.
+- Docker images are now pinned by digest (not tag) and carry OCI labels;
+  `cargo build --locked` throughout; `docker-compose.yml` runs the container
+  read-only with all capabilities dropped, `no-new-privileges`, and a `tmpfs`
+  `/tmp`.
+- GitHub Actions in CI are pinned by commit SHA with least-privilege
+  `permissions:`.
+- The release script (`scripts/release.sh`) now reads its macOS
+  build/sign/notarize configuration from `scripts/release.local.env` (copy
+  from `scripts/release.local.env.example`) instead of requiring the
+  environment to be pre-populated by hand.
+- MCP bearer tokens are now signed and verified by a small built-in HS256
+  implementation (strict header, constant-time MAC check, typed claims),
+  replacing the `jsonwebtoken` crate. Existing tokens stay valid.
+- Dependencies updated across the board, including the MCP SDK (`rmcp` 2.x).
+
+### Security
+
+- The SQLite database is now created with file mode `0600`, and an existing
+  database with looser permissions is tightened on startup; the automatic
+  pre-migration backup (see "Upgrading from 0.x" below) is created `0600`
+  too.
+- `docs_format_text` no longer panics on a non-ASCII colour string.
+
+### Upgrading from 0.x
+
+No action required for the upgrade itself: on first startup against an
+existing database, migration `002_consent_and_revocation.sql` runs
+automatically, and the server writes a full backup to
+`<DATABASE_URL>.pre-002.bak` (mode `0600`) before applying it. If you need to
+roll back to a 0.x binary afterward, stop the server, restore that backup
+file over the live database, and start the old binary — a 0.x binary refuses
+to open a database with the newer schema, which is exactly why the backup
+exists. See [Operations](README.md#operations) in the README for the
+`accounts list`/`accounts revoke` commands this release adds, and for the
+recommended `chown`/`setfacl` alternative to `chmod 0777` on the file-exchange
+directory.
+
+Two things to check:
+
+- **Reverse proxies and tunnels.** Requests are now accepted only for
+  loopback names and `BASE_URL`'s host. If clients reach the server under
+  any other hostname, add it to `ALLOWED_HOSTS`, or those requests get
+  `403`.
+- **Existing connections keep working.** Every token this server has issued
+  carries an audience for its `/mcp` URL, so connected clients stay signed in
+  until the normal 30-day expiry. The consent screen appears the next time a
+  client connects or re-authenticates.
+
 ## [0.12.0] - 2026-09-23
 
 ### Added
@@ -126,7 +254,7 @@ extension**, without changing anything about the existing HTTP server.
   inbound network exposure.
 - **Claude Desktop bundle (`.mcpb`)** — prebuilt, one-click installable MCP
   Bundle carrying native binaries for macOS, Windows, and Linux. See
-  [`mcpb/`](mcpb/). Published on the [Releases](https://github.com/matpb/google-mcp-rs/releases)
+  `mcpb/` (removed in 0.11.0, see above). Published on the [Releases](https://github.com/matpb/google-mcp-rs/releases)
   page.
 - **`google_authenticate` tool** — in-chat Google sign-in for stdio mode. Opens
   a browser via a loopback OAuth flow and stores the encrypted refresh token

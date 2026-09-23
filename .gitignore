@@ -11,3 +11,4 @@ dist/
 # Local-only operator secrets — never committed.
 client_secret*.json
 service-account*.json
+scripts/release.local.env

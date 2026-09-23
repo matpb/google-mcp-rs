@@ -6,8 +6,12 @@ use reqwest::Method;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use super::http::{
+    InvalidPathSegment, MAX_API_RESPONSE_BYTES, ReadBodyError, read_body_capped,
+    resource_name as validate_resource_name,
+};
+
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum PeopleError {
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
@@ -15,7 +19,30 @@ pub enum PeopleError {
     Api { status: StatusCode, message: String },
     #[error("could not parse People response: {0}")]
     Parse(serde_json::Error),
+    #[error("invalid id: {0}")]
+    InvalidId(String),
+    #[error("response body exceeds the {cap}-byte cap (at least {actual} bytes)")]
+    TooLarge { cap: usize, actual: usize },
 }
+
+impl From<InvalidPathSegment> for PeopleError {
+    fn from(e: InvalidPathSegment) -> Self {
+        PeopleError::InvalidId(e.0)
+    }
+}
+
+impl From<ReadBodyError> for PeopleError {
+    fn from(e: ReadBodyError) -> Self {
+        match e {
+            ReadBodyError::Http(e) => PeopleError::Http(e),
+            ReadBodyError::TooLarge { cap, actual } => PeopleError::TooLarge { cap, actual },
+        }
+    }
+}
+
+/// Resource-name prefixes this client accepts (`people/c123`,
+/// `contactGroups/xyz`, `otherContacts/x`).
+const RESOURCE_PREFIXES: &[&str] = &["people", "contactGroups", "otherContacts"];
 
 const BASE: &str = "https://people.googleapis.com/v1";
 
@@ -89,6 +116,7 @@ impl PeopleClient {
         resource_name: &str,
         person_fields: &str,
     ) -> Result<Value, PeopleError> {
+        let resource_name = validate_resource_name(resource_name, RESOURCE_PREFIXES)?;
         self.request(
             Method::GET,
             format!("{BASE}/{resource_name}"),
@@ -170,6 +198,7 @@ impl PeopleClient {
         update_person_fields: &str,
         person_fields: &str,
     ) -> Result<Value, PeopleError> {
+        let resource_name = validate_resource_name(resource_name, RESOURCE_PREFIXES)?;
         self.request(
             Method::PATCH,
             format!("{BASE}/{resource_name}:updateContact"),
@@ -186,6 +215,7 @@ impl PeopleClient {
     }
 
     pub async fn delete_contact(&self, resource_name: &str) -> Result<Value, PeopleError> {
+        let resource_name = validate_resource_name(resource_name, RESOURCE_PREFIXES)?;
         self.request(
             Method::DELETE,
             format!("{BASE}/{resource_name}:deleteContact"),
@@ -221,6 +251,7 @@ impl PeopleClient {
         resource_name: &str,
         max_members: Option<u32>,
     ) -> Result<Value, PeopleError> {
+        let resource_name = validate_resource_name(resource_name, RESOURCE_PREFIXES)?;
         let mut q: Vec<(String, String)> = vec![];
         if let Some(n) = max_members {
             q.push(("maxMembers".into(), n.to_string()));
@@ -250,6 +281,7 @@ impl PeopleClient {
         name: &str,
         etag: Option<&str>,
     ) -> Result<Value, PeopleError> {
+        let resource_name = validate_resource_name(resource_name, RESOURCE_PREFIXES)?;
         let mut group = json!({ "name": name });
         if let Some(e) = etag {
             group["etag"] = json!(e);
@@ -268,6 +300,7 @@ impl PeopleClient {
         resource_name: &str,
         delete_contacts: bool,
     ) -> Result<Value, PeopleError> {
+        let resource_name = validate_resource_name(resource_name, RESOURCE_PREFIXES)?;
         self.request(
             Method::DELETE,
             format!("{BASE}/{resource_name}"),
@@ -283,6 +316,7 @@ impl PeopleClient {
         add: &[String],
         remove: &[String],
     ) -> Result<Value, PeopleError> {
+        let resource_name = validate_resource_name(resource_name, RESOURCE_PREFIXES)?;
         self.request(
             Method::POST,
             format!("{BASE}/{resource_name}/members:modify"),
@@ -318,16 +352,16 @@ impl PeopleClient {
         }
         let resp = req.send().await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         if status.is_success() {
-            if text.is_empty() {
+            if bytes.is_empty() {
                 return Ok(serde_json::json!({}));
             }
-            return serde_json::from_str(&text).map_err(PeopleError::Parse);
+            return serde_json::from_slice(&bytes).map_err(PeopleError::Parse);
         }
         Err(PeopleError::Api {
             status,
-            message: text.chars().take(800).collect(),
+            message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
         })
     }
 }

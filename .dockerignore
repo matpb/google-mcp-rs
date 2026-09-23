@@ -2,4 +2,11 @@ target
 .git
 .env
 *.db
+*.db-wal
+*.db-shm
 *.md
+dist/
+scripts/
+.github/
+.env.*
+!.env.example

@@ -1,20 +1,16 @@
-//! Google Calendar v3 client. Same shape as the Sheets / Drive / Docs
-//! clients: a thin reqwest wrapper that authenticates with the user's
-//! current access token and forwards Google's JSON to callers as
-//! `serde_json::Value`.
-//!
-//! Calendar IDs are typically `"primary"`, an email address, or a
-//! `…@group.calendar.google.com` ID. `@` is a path-safe character per
-//! RFC 3986, so we format IDs into the URL directly without escaping —
-//! matching how `sheets.rs` formats A1 ranges.
+//! Google Calendar v3 client. IDs can contain `#` (holiday calendars);
+//! every caller-supplied path segment goes through `http::seg`.
 
 use http::StatusCode;
 use reqwest::Method;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::http::{
+    InvalidPathSegment, MAX_API_RESPONSE_BYTES, ReadBodyError, read_body_capped, seg,
+};
+
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum CalendarError {
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
@@ -22,6 +18,25 @@ pub enum CalendarError {
     Api { status: StatusCode, message: String },
     #[error("could not parse Calendar response: {0}")]
     Parse(serde_json::Error),
+    #[error("invalid id: {0}")]
+    InvalidId(String),
+    #[error("response body exceeds the {cap}-byte cap (at least {actual} bytes)")]
+    TooLarge { cap: usize, actual: usize },
+}
+
+impl From<InvalidPathSegment> for CalendarError {
+    fn from(e: InvalidPathSegment) -> Self {
+        CalendarError::InvalidId(e.0)
+    }
+}
+
+impl From<ReadBodyError> for CalendarError {
+    fn from(e: ReadBodyError) -> Self {
+        match e {
+            ReadBodyError::Http(e) => CalendarError::Http(e),
+            ReadBodyError::TooLarge { cap, actual } => CalendarError::TooLarge { cap, actual },
+        }
+    }
 }
 
 const BASE: &str = "https://www.googleapis.com/calendar/v3";
@@ -76,6 +91,7 @@ impl CalendarClient {
     }
 
     pub async fn get_calendar(&self, calendar_id: &str) -> Result<Value, CalendarError> {
+        let calendar_id = seg(calendar_id)?;
         self.request(
             Method::GET,
             format!("{BASE}/calendars/{calendar_id}"),
@@ -95,6 +111,7 @@ impl CalendarClient {
     /// Permanently delete a secondary calendar. The user's primary calendar
     /// cannot be deleted.
     pub async fn delete_calendar(&self, calendar_id: &str) -> Result<Value, CalendarError> {
+        let calendar_id = seg(calendar_id)?;
         self.request(
             Method::DELETE,
             format!("{BASE}/calendars/{calendar_id}"),
@@ -113,6 +130,7 @@ impl CalendarClient {
         calendar_id: &str,
         params: &EventsListQuery<'_>,
     ) -> Result<Value, CalendarError> {
+        let calendar_id = seg(calendar_id)?;
         let q = params.to_query();
         self.request(
             Method::GET,
@@ -129,6 +147,8 @@ impl CalendarClient {
         event_id: &str,
         time_zone: Option<&str>,
     ) -> Result<Value, CalendarError> {
+        let calendar_id = seg(calendar_id)?;
+        let event_id = seg(event_id)?;
         let mut q: Vec<(String, String)> = vec![];
         if let Some(tz) = time_zone {
             q.push(("timeZone".into(), tz.into()));
@@ -149,6 +169,7 @@ impl CalendarClient {
         send_updates: Option<&str>,
         conference_data_version: Option<u8>,
     ) -> Result<Value, CalendarError> {
+        let calendar_id = seg(calendar_id)?;
         let mut q: Vec<(String, String)> = vec![];
         if let Some(s) = send_updates {
             q.push(("sendUpdates".into(), s.into()));
@@ -173,6 +194,7 @@ impl CalendarClient {
         text: &str,
         send_updates: Option<&str>,
     ) -> Result<Value, CalendarError> {
+        let calendar_id = seg(calendar_id)?;
         let mut q: Vec<(String, String)> = vec![("text".into(), text.into())];
         if let Some(s) = send_updates {
             q.push(("sendUpdates".into(), s.into()));
@@ -194,6 +216,8 @@ impl CalendarClient {
         send_updates: Option<&str>,
         conference_data_version: Option<u8>,
     ) -> Result<Value, CalendarError> {
+        let calendar_id = seg(calendar_id)?;
+        let event_id = seg(event_id)?;
         let mut q: Vec<(String, String)> = vec![];
         if let Some(s) = send_updates {
             q.push(("sendUpdates".into(), s.into()));
@@ -216,6 +240,8 @@ impl CalendarClient {
         event_id: &str,
         send_updates: Option<&str>,
     ) -> Result<Value, CalendarError> {
+        let calendar_id = seg(calendar_id)?;
+        let event_id = seg(event_id)?;
         let mut q: Vec<(String, String)> = vec![];
         if let Some(s) = send_updates {
             q.push(("sendUpdates".into(), s.into()));
@@ -236,6 +262,8 @@ impl CalendarClient {
         destination_calendar_id: &str,
         send_updates: Option<&str>,
     ) -> Result<Value, CalendarError> {
+        let calendar_id = seg(calendar_id)?;
+        let event_id = seg(event_id)?;
         let mut q: Vec<(String, String)> =
             vec![("destination".into(), destination_calendar_id.into())];
         if let Some(s) = send_updates {
@@ -292,16 +320,16 @@ impl CalendarClient {
         }
         let resp = req.send().await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         if status.is_success() {
-            if text.is_empty() {
+            if bytes.is_empty() {
                 return Ok(serde_json::json!({}));
             }
-            return serde_json::from_str(&text).map_err(CalendarError::Parse);
+            return serde_json::from_slice(&bytes).map_err(CalendarError::Parse);
         }
         Err(CalendarError::Api {
             status,
-            message: text.chars().take(800).collect(),
+            message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
         })
     }
 }
@@ -380,7 +408,7 @@ mod tests {
             single_events: Some(true),
             order_by: Some("startTime"),
             show_deleted: false,
-            time_zone: Some("America/Montreal"),
+            time_zone: Some("America/New_York"),
             updated_min: None,
         }
         .to_query();
@@ -391,7 +419,7 @@ mod tests {
         assert!(pairs.contains(&("maxResults", "50")));
         assert!(pairs.contains(&("singleEvents", "true")));
         assert!(pairs.contains(&("orderBy", "startTime")));
-        assert!(pairs.contains(&("timeZone", "America/Montreal")));
+        assert!(pairs.contains(&("timeZone", "America/New_York")));
         // Untouched fields are absent.
         assert!(!pairs.iter().any(|(k, _)| *k == "pageToken"));
         assert!(!pairs.iter().any(|(k, _)| *k == "showDeleted"));

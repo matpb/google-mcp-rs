@@ -134,6 +134,61 @@ pub async fn touch_last_refresh(db: &Db, google_sub: &str) -> Result<(), DbError
     .await
 }
 
+pub async fn list_all(db: &Db) -> Result<Vec<Account>, DbError> {
+    db.call(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT google_sub, email, scopes, created_at, updated_at, last_refresh_at
+             FROM oauth_accounts ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                let scopes: String = r.get(2)?;
+                Ok(Account {
+                    google_sub: r.get(0)?,
+                    email: r.get(1)?,
+                    scopes: scopes.split_whitespace().map(str::to_string).collect(),
+                    created_at: r.get(3)?,
+                    updated_at: r.get(4)?,
+                    last_refresh_at: r.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+    .await
+}
+
+/// Look up by `google_sub` first, then by exact (case-insensitive) email.
+pub async fn find_by_email_or_sub(db: &Db, target: &str) -> Result<Option<Account>, DbError> {
+    if let Some(a) = get(db, target).await? {
+        return Ok(Some(a));
+    }
+    let target = target.to_string();
+    db.call(move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT google_sub, email, scopes, created_at, updated_at, last_refresh_at
+             FROM oauth_accounts WHERE email = ?1 COLLATE NOCASE LIMIT 1",
+        )?;
+        let row = stmt.query_row([&target], |r| {
+            let scopes: String = r.get(2)?;
+            Ok(Account {
+                google_sub: r.get(0)?,
+                email: r.get(1)?,
+                scopes: scopes.split_whitespace().map(str::to_string).collect(),
+                created_at: r.get(3)?,
+                updated_at: r.get(4)?,
+                last_refresh_at: r.get(5)?,
+            })
+        });
+        match row {
+            Ok(a) => Ok(Some(a)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await
+}
+
 pub async fn delete(db: &Db, google_sub: &str) -> Result<(), DbError> {
     let google_sub = google_sub.to_string();
     db.call(move |conn| {
@@ -389,6 +444,75 @@ mod tests {
             latest_google_sub(&db).await.unwrap().as_deref(),
             Some("sub-old")
         );
+    }
+
+    #[tokio::test]
+    async fn list_all_orders_by_updated_at_desc() {
+        let db = Db::open_in_memory().await.unwrap();
+        for sub in ["sub-old", "sub-new"] {
+            upsert(
+                &db,
+                &key(),
+                UpsertAccount {
+                    google_sub: sub.to_string(),
+                    email: format!("{sub}@x.com"),
+                    refresh_token: "t".to_string(),
+                    scopes: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        }
+        db.call(|conn| {
+            conn.execute(
+                "UPDATE oauth_accounts SET updated_at = 100 WHERE google_sub = 'sub-old'",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE oauth_accounts SET updated_at = 200 WHERE google_sub = 'sub-new'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let all = list_all(&db).await.unwrap();
+        assert_eq!(all[0].google_sub, "sub-new");
+        assert_eq!(all[1].google_sub, "sub-old");
+    }
+
+    #[tokio::test]
+    async fn find_by_email_or_sub_matches_either() {
+        let db = Db::open_in_memory().await.unwrap();
+        upsert(
+            &db,
+            &key(),
+            UpsertAccount {
+                google_sub: "sub-1".to_string(),
+                email: "User@X.com".to_string(),
+                refresh_token: "t".to_string(),
+                scopes: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            find_by_email_or_sub(&db, "sub-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .email,
+            "User@X.com"
+        );
+        assert_eq!(
+            find_by_email_or_sub(&db, "user@x.com")
+                .await
+                .unwrap()
+                .unwrap()
+                .google_sub,
+            "sub-1"
+        );
+        assert!(find_by_email_or_sub(&db, "nobody").await.unwrap().is_none());
     }
 
     #[tokio::test]

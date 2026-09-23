@@ -48,9 +48,7 @@ pub enum Category {
     /// User needs to re-authorize this MCP server through their MCP
     /// client. Not retryable from the tool layer — only the user can fix.
     AuthRequired,
-    /// Auth header missing/malformed/forged. Distinct from AuthRequired
-    /// because here the JWT itself is invalid (vs. the upstream Google
-    /// refresh token being revoked).
+    /// JWT itself is invalid, vs. `AuthRequired`'s revoked upstream token.
     AuthInvalid,
     /// Google rate limit hit. Retryable after backoff.
     RateLimited,
@@ -61,7 +59,7 @@ pub enum Category {
     /// Retryable after a short delay.
     Transient,
     /// Upstream returned an error we don't categorize specifically.
-    /// Agent should look at message + http_status to decide.
+    /// Agent should look at message + `http_status` to decide.
     Upstream,
     /// Server-side bug. Retry won't help.
     Internal,
@@ -110,10 +108,10 @@ pub struct McpError {
     pub retry_after_ms: Option<u64>,
     pub hint: Option<String>,
     /// Optional resource kind ("message", "thread", "file", ...) for
-    /// NotFound errors so agents can target the right discovery tool.
+    /// `NotFound` errors so agents can target the right discovery tool.
     pub resource_kind: Option<&'static str>,
     pub resource_id: Option<String>,
-    /// For AuthRequired: where the user (or their MCP client) should go
+    /// For `AuthRequired`: where the user (or their MCP client) should go
     /// to start a fresh OAuth flow.
     pub reconnect_url: Option<String>,
 }
@@ -265,6 +263,8 @@ impl From<GmailError> for McpError {
                     .with_service("gmail")
             }
             GmailError::Invalid(s) => McpError::invalid_input(format!("invalid input: {s}")),
+            GmailError::InvalidId(s) => invalid_id_error("gmail", s),
+            GmailError::TooLarge { cap, actual } => too_large_error("gmail", cap, actual),
         }
     }
 }
@@ -280,6 +280,8 @@ impl From<SheetsError> for McpError {
                 McpError::internal(format!("could not parse Sheets response: {err}"))
                     .with_service("sheets")
             }
+            SheetsError::InvalidId(s) => invalid_id_error("sheets", s),
+            SheetsError::TooLarge { cap, actual } => too_large_error("sheets", cap, actual),
         }
     }
 }
@@ -295,6 +297,8 @@ impl From<DocsError> for McpError {
                 McpError::internal(format!("could not parse Docs response: {err}"))
                     .with_service("docs")
             }
+            DocsError::InvalidId(s) => invalid_id_error("docs", s),
+            DocsError::TooLarge { cap, actual } => too_large_error("docs", cap, actual),
         }
     }
 }
@@ -310,6 +314,8 @@ impl From<DriveError> for McpError {
                 McpError::internal(format!("could not parse Drive response: {err}"))
                     .with_service("drive")
             }
+            DriveError::InvalidId(s) => invalid_id_error("drive", s),
+            DriveError::TooLarge { cap, actual } => too_large_error("drive", cap, actual),
         }
     }
 }
@@ -343,6 +349,8 @@ impl From<CalendarError> for McpError {
                 McpError::internal(format!("could not parse Calendar response: {err}"))
                     .with_service("calendar")
             }
+            CalendarError::InvalidId(s) => invalid_id_error("calendar", s),
+            CalendarError::TooLarge { cap, actual } => too_large_error("calendar", cap, actual),
         }
     }
 }
@@ -396,12 +404,10 @@ impl From<CredentialsError> for McpError {
 impl From<JwtError> for McpError {
     fn from(e: JwtError) -> Self {
         let kind = match &e {
-            JwtError::Verify(inner) => match inner.kind() {
-                jsonwebtoken::errors::ErrorKind::ExpiredSignature => "expired",
-                jsonwebtoken::errors::ErrorKind::InvalidSignature => "invalid_signature",
-                _ => "invalid",
-            },
-            JwtError::Sign(_) => return McpError::internal(format!("could not sign JWT: {e}")),
+            JwtError::Expired => "expired",
+            JwtError::BadSignature => "invalid_signature",
+            JwtError::Malformed => "invalid",
+            JwtError::Sign => return McpError::internal(format!("could not sign JWT: {e}")),
             JwtError::AudienceMismatch => "audience_mismatch",
         };
         let mut err = McpError::base(Category::AuthInvalid, e.to_string());
@@ -447,6 +453,18 @@ impl From<SessionError> for McpError {
                 resource_kind: None,
                 resource_id: None,
                 reconnect_url: Some("/authorize".into()),
+            },
+            SessionError::AccountNotAllowed => McpError {
+                category: Category::AuthRequired,
+                message: "this Google account is not in ALLOWED_GOOGLE_ACCOUNTS".into(),
+                service: Some("oauth"),
+                http_status: Some(403),
+                upstream_reason: Some("account_not_allowed".into()),
+                retry_after_ms: None,
+                hint: Some("Sign in with an account the operator has allowlisted.".into()),
+                resource_kind: None,
+                resource_id: None,
+                reconnect_url: None,
             },
             SessionError::Storage(db) => McpError::internal(format!("storage: {db}"))
                 .with_service("storage"),
@@ -508,6 +526,7 @@ impl From<SessionError> for McpError {
                 .with_service("oauth"),
                 GoogleOAuthError::IdToken(s) => McpError::internal(format!("ID token parse: {s}"))
                     .with_service("oauth"),
+                GoogleOAuthError::TooLarge { cap, actual } => too_large_error("oauth", cap, actual),
             },
         }
     }
@@ -516,6 +535,24 @@ impl From<SessionError> for McpError {
 // ===========================================================================
 // HTTP-status → category classifier shared by Gmail/Sheets/Drive
 // ===========================================================================
+
+/// Shared mapping for every domain's `InvalidId(String)` variant.
+fn invalid_id_error(service: &'static str, detail: String) -> McpError {
+    McpError::invalid_input(format!("invalid {service} id: {detail}"))
+        .with_service(service)
+        .with_hint("IDs must be a single resource id, not a path, URL, or containing `.`/`..`.")
+}
+
+/// Shared mapping for every domain's `TooLarge { cap, actual }` variant.
+fn too_large_error(service: &'static str, cap: usize, actual: usize) -> McpError {
+    McpError::invalid_input(format!(
+        "{service} response body of at least {actual} bytes exceeds the {cap}-byte cap"
+    ))
+    .with_service(service)
+    .with_hint(
+        "Narrow the request (fields filter, pagination, smaller range) instead of retrying as-is.",
+    )
+}
 
 fn google_api_error(
     service: &'static str,
@@ -590,10 +627,10 @@ fn classify_http(
         ),
         403 => {
             let cat = match upstream_reason {
-                Some("rateLimitExceeded") | Some("userRateLimitExceeded") | Some("quotaExceeded") => {
+                Some("rateLimitExceeded" | "userRateLimitExceeded" | "quotaExceeded") => {
                     Category::RateLimited
                 }
-                Some("insufficientPermissions") | Some("forbidden") | Some("notFound") => {
+                Some("insufficientPermissions" | "forbidden" | "notFound") => {
                     Category::PermissionDenied
                 }
                 _ => Category::PermissionDenied,
@@ -691,6 +728,8 @@ impl From<PeopleError> for McpError {
                 McpError::internal(format!("could not parse People response: {err}"))
                     .with_service("people")
             }
+            PeopleError::InvalidId(s) => invalid_id_error("people", s),
+            PeopleError::TooLarge { cap, actual } => too_large_error("people", cap, actual),
         }
     }
 }
@@ -706,6 +745,8 @@ impl From<TasksError> for McpError {
                 McpError::internal(format!("could not parse Tasks response: {err}"))
                     .with_service("tasks")
             }
+            TasksError::InvalidId(s) => invalid_id_error("tasks", s),
+            TasksError::TooLarge { cap, actual } => too_large_error("tasks", cap, actual),
         }
     }
 }
@@ -720,6 +761,10 @@ impl From<SearchConsoleError> for McpError {
             SearchConsoleError::Parse(err) => {
                 McpError::internal(format!("could not parse Search Console response: {err}"))
                     .with_service("searchconsole")
+            }
+            SearchConsoleError::InvalidId(s) => invalid_id_error("searchconsole", s),
+            SearchConsoleError::TooLarge { cap, actual } => {
+                too_large_error("searchconsole", cap, actual)
             }
         }
     }

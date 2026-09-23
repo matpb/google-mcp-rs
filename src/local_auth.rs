@@ -137,17 +137,16 @@ pub async fn run_loopback(
         .id_token
         .as_deref()
         .ok_or_else(|| "Google did not return an id_token (need 'openid' scope)".to_string())?;
-    let id = parse_id_token(id_token).map_err(|e| format!("could not parse id_token: {e}"))?;
+    let id = parse_id_token(id_token, &oauth.client_id)
+        .map_err(|e| format!("could not parse id_token: {e}"))?;
     let refresh_token = grant.refresh_token.as_deref().ok_or_else(|| {
         "Google did not return a refresh_token. Revoke prior access at \
          https://myaccount.google.com/permissions and try again."
             .to_string()
     })?;
-    let scopes: Vec<String> = grant
-        .scope
-        .as_deref()
-        .map(|s| s.split_whitespace().map(str::to_string).collect())
-        .unwrap_or(default_scopes);
+    let scopes: Vec<String> = grant.scope.as_deref().map_or(default_scopes, |s| {
+        s.split_whitespace().map(str::to_string).collect()
+    });
     let email = id.email.clone().unwrap_or_default();
 
     accounts::upsert(

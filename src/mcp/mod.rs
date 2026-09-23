@@ -2,6 +2,7 @@
 
 pub mod auth_tools;
 pub mod calendar_tools;
+pub mod common;
 pub mod docs_tools;
 pub mod drive_tools;
 pub mod files_tools;

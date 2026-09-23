@@ -9,10 +9,11 @@ use serde_json::{Value, json};
 
 use crate::errors::{McpError, to_mcp};
 use crate::google::docs::{
-    BULLET_PRESETS, DocsClient, DocsError, PARAGRAPH_STYLE_NAMES, TextStyleSpec, end_of_body,
+    BULLET_PRESETS, DocsClient, PARAGRAPH_STYLE_NAMES, TextStyleSpec, end_of_body,
     extract_plain_text, find_match_ranges, hex_to_rgb, paragraph_style_request, text_style_request,
     utf16_len,
 };
+use crate::mcp::common;
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
 
@@ -27,8 +28,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DocsCreateParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
         let body = json!({"title": p.title});
         client
             .create(&body)
@@ -46,13 +46,12 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DocsGetParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
         client
             .get(&p.document_id, p.suggestions_view_mode.as_deref())
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_docs_not_found(e, &p.document_id))
+            .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))
     }
 
     #[tool(
@@ -64,12 +63,11 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DocsGetTextParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
         let doc = client
             .get(&p.document_id, None)
             .await
-            .map_err(|e| reclassify_docs_not_found(e, &p.document_id))?;
+            .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))?;
         let text = extract_plain_text(&doc);
         let title = doc.get("title").cloned().unwrap_or(json!(null));
         let revision_id = doc.get("revisionId").cloned().unwrap_or(json!(null));
@@ -94,8 +92,7 @@ impl GoogleMcp {
         if p.text.is_empty() {
             return Err(McpError::invalid_input("`text` must not be empty").into());
         }
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
         let body = json!({
             "requests": [{
                 "insertText": {
@@ -108,7 +105,7 @@ impl GoogleMcp {
             .batch_update(&p.document_id, &body)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_docs_not_found(e, &p.document_id))
+            .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))
     }
 
     #[tool(
@@ -123,8 +120,7 @@ impl GoogleMcp {
         if p.text.is_empty() {
             return Err(McpError::invalid_input("`text` must not be empty").into());
         }
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
         let body = json!({
             "requests": [{
                 "insertText": {
@@ -137,7 +133,7 @@ impl GoogleMcp {
             .batch_update(&p.document_id, &body)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_docs_not_found(e, &p.document_id))
+            .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))
     }
 
     #[tool(
@@ -154,8 +150,7 @@ impl GoogleMcp {
                 .with_hint("Replacing every empty match would touch every position in the doc.")
                 .into());
         }
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
         let body = json!({
             "requests": [{
                 "replaceAllText": {
@@ -168,7 +163,7 @@ impl GoogleMcp {
             .batch_update(&p.document_id, &body)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_docs_not_found(e, &p.document_id))
+            .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))
     }
 
     #[tool(
@@ -180,13 +175,12 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DocsBatchUpdateParams>,
     ) -> Result<String, ErrorData> {
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
         client
             .batch_update(&p.document_id, &p.body)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_docs_not_found(e, &p.document_id))
+            .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))
     }
 
     // -----------------------------------------------------------------
@@ -212,8 +206,7 @@ impl GoogleMcp {
             validate_text_style_colors(style)?;
         }
 
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
 
         let text_len = utf16_len(&p.text);
 
@@ -231,10 +224,9 @@ impl GoogleMcp {
                 idx,
             ),
             None => {
-                let doc = client
-                    .get(&p.document_id, None)
-                    .await
-                    .map_err(|e| reclassify_docs_not_found(e, &p.document_id))?;
+                let doc = client.get(&p.document_id, None).await.map_err(|e| {
+                    common::reclassify_not_found(e, "document", &p.document_id, "docs")
+                })?;
                 let end = end_of_body(&doc).ok_or_else(|| -> ErrorData {
                     McpError::internal("could not determine end of body — doc has no body content")
                         .with_service("docs")
@@ -269,7 +261,7 @@ impl GoogleMcp {
         let result = client
             .batch_update(&p.document_id, &body)
             .await
-            .map_err(|e| reclassify_docs_not_found(e, &p.document_id))?;
+            .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))?;
 
         Ok(json!({
             "documentId": p.document_id,
@@ -328,25 +320,18 @@ impl GoogleMcp {
                 .into());
         }
 
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
 
         // Compute the list of ranges to style.
         let ranges: Vec<(u32, u32)> = if let Some(r) = &p.range {
-            if r.start_index >= r.end_index {
-                return Err(McpError::invalid_input(format!(
-                    "invalid range: start_index ({}) must be less than end_index ({})",
-                    r.start_index, r.end_index
-                ))
-                .into());
-            }
+            validate_index_range(r.start_index, r.end_index)?;
             vec![(r.start_index, r.end_index)]
         } else {
             let needle = p.match_text.as_deref().unwrap();
             let doc = client
                 .get(&p.document_id, None)
                 .await
-                .map_err(|e| reclassify_docs_not_found(e, &p.document_id))?;
+                .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))?;
             find_match_ranges(&doc, needle, p.match_case)
         };
 
@@ -384,7 +369,7 @@ impl GoogleMcp {
         let result = client
             .batch_update(&p.document_id, &body)
             .await
-            .map_err(|e| reclassify_docs_not_found(e, &p.document_id))?;
+            .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))?;
 
         Ok(json!({
             "documentId": p.document_id,
@@ -407,13 +392,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DocsMakeListParams>,
     ) -> Result<String, ErrorData> {
-        if p.range.start_index >= p.range.end_index {
-            return Err(McpError::invalid_input(format!(
-                "invalid range: start_index ({}) must be less than end_index ({})",
-                p.range.start_index, p.range.end_index
-            ))
-            .into());
-        }
+        validate_index_range(p.range.start_index, p.range.end_index)?;
 
         let preset = match (p.bullet_preset.as_deref(), p.style.as_deref()) {
             (Some(explicit), _) => explicit.to_string(),
@@ -429,8 +408,7 @@ impl GoogleMcp {
             );
         }
 
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
 
         let body = json!({
             "requests": [{
@@ -446,7 +424,7 @@ impl GoogleMcp {
         let result = client
             .batch_update(&p.document_id, &body)
             .await
-            .map_err(|e| reclassify_docs_not_found(e, &p.document_id))?;
+            .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))?;
 
         Ok(json!({
             "documentId": p.document_id,
@@ -466,20 +444,9 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DocsInsertTableParams>,
     ) -> Result<String, ErrorData> {
-        if p.rows == 0 || p.columns == 0 {
-            return Err(McpError::invalid_input("`rows` and `columns` must be at least 1").into());
-        }
-        // Google's hard limits: 20 cols × 100 rows max in the API.
-        if p.rows > 100 || p.columns > 20 {
-            return Err(McpError::invalid_input(format!(
-                "table too large: rows={} cols={}; Docs API caps at 100 rows × 20 columns",
-                p.rows, p.columns
-            ))
-            .into());
-        }
+        validate_table_dims(p.rows, p.columns)?;
 
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
 
         let location = match p.at_index {
             Some(idx) => json!({"location": {"index": idx}}),
@@ -500,7 +467,7 @@ impl GoogleMcp {
         let result = client
             .batch_update(&p.document_id, &body)
             .await
-            .map_err(|e| reclassify_docs_not_found(e, &p.document_id))?;
+            .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))?;
 
         Ok(json!({
             "documentId": p.document_id,
@@ -528,8 +495,7 @@ impl GoogleMcp {
                 .into());
         }
 
-        let session = self.resolve_session(&parts).await?;
-        let client = DocsClient::new((*self.state.http).clone(), session.access_token);
+        let client = self.docs_for(&parts).await?;
 
         let mut insert_image = serde_json::Map::new();
         insert_image.insert("uri".into(), json!(p.image_url));
@@ -555,7 +521,7 @@ impl GoogleMcp {
         let result = client
             .batch_update(&p.document_id, &body)
             .await
-            .map_err(|e| reclassify_docs_not_found(e, &p.document_id))?;
+            .map_err(|e| common::reclassify_not_found(e, "document", &p.document_id, "docs"))?;
 
         Ok(json!({
             "documentId": p.document_id,
@@ -567,9 +533,46 @@ impl GoogleMcp {
     }
 }
 
+impl GoogleMcp {
+    pub(crate) async fn docs_for(&self, parts: &Parts) -> Result<DocsClient, ErrorData> {
+        let session = self.resolve_session(parts).await?;
+        Ok(DocsClient::new(
+            (*self.state.http).clone(),
+            session.access_token,
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Validation helpers
 // ---------------------------------------------------------------------------
+
+/// Docs API's hard table cap.
+const DOCS_TABLE_MAX_ROWS: u32 = 100;
+const DOCS_TABLE_MAX_COLS: u32 = 20;
+
+fn validate_index_range(start_index: u32, end_index: u32) -> Result<(), ErrorData> {
+    if start_index >= end_index {
+        return Err(McpError::invalid_input(format!(
+            "invalid range: start_index ({start_index}) must be less than end_index ({end_index})"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_table_dims(rows: u32, columns: u32) -> Result<(), ErrorData> {
+    if rows == 0 || columns == 0 {
+        return Err(McpError::invalid_input("`rows` and `columns` must be at least 1").into());
+    }
+    if rows > DOCS_TABLE_MAX_ROWS || columns > DOCS_TABLE_MAX_COLS {
+        return Err(McpError::invalid_input(format!(
+            "table too large: rows={rows} cols={columns}; Docs API caps at {DOCS_TABLE_MAX_ROWS} rows × {DOCS_TABLE_MAX_COLS} columns"
+        ))
+        .into());
+    }
+    Ok(())
+}
 
 fn validate_paragraph_style(name: &str) -> Result<(), ErrorData> {
     if !PARAGRAPH_STYLE_NAMES.contains(&name) {
@@ -630,13 +633,64 @@ fn spec_from_param(p: &DocsTextStyleSpec) -> TextStyleSpec {
     }
 }
 
-/// Re-classify a Docs 404 with the document kind so agents target the
-/// right discovery (`drive_list_files` with the Doc mimeType).
-fn reclassify_docs_not_found(e: DocsError, document_id: &str) -> ErrorData {
-    if let DocsError::Api { status, .. } = &e
-        && status.as_u16() == 404
-    {
-        return McpError::not_found("document", document_id, "docs").into();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paragraph_style_rejects_unknown_name() {
+        assert!(validate_paragraph_style("NOT_A_REAL_STYLE").is_err());
     }
-    to_mcp(e)
+
+    #[test]
+    fn paragraph_style_accepts_known_name() {
+        let name = PARAGRAPH_STYLE_NAMES[0];
+        assert!(validate_paragraph_style(name).is_ok());
+    }
+
+    #[test]
+    fn text_style_colors_rejects_bad_hex() {
+        let style = DocsTextStyleSpec {
+            foreground_color_hex: Some("not-a-color".into()),
+            ..Default::default()
+        };
+        assert!(validate_text_style_colors(&style).is_err());
+    }
+
+    #[test]
+    fn text_style_colors_accepts_valid_hex() {
+        let style = DocsTextStyleSpec {
+            foreground_color_hex: Some("#16a766".into()),
+            ..Default::default()
+        };
+        assert!(validate_text_style_colors(&style).is_ok());
+    }
+
+    #[test]
+    fn index_range_rejects_start_gte_end() {
+        assert!(validate_index_range(10, 10).is_err());
+        assert!(validate_index_range(10, 5).is_err());
+    }
+
+    #[test]
+    fn index_range_accepts_start_lt_end() {
+        assert!(validate_index_range(5, 10).is_ok());
+    }
+
+    #[test]
+    fn table_dims_rejects_zero_rows_or_cols() {
+        assert!(validate_table_dims(0, 5).is_err());
+        assert!(validate_table_dims(5, 0).is_err());
+    }
+
+    #[test]
+    fn table_dims_rejects_over_cap() {
+        assert!(validate_table_dims(DOCS_TABLE_MAX_ROWS + 1, 1).is_err());
+        assert!(validate_table_dims(1, DOCS_TABLE_MAX_COLS + 1).is_err());
+    }
+
+    #[test]
+    fn table_dims_accepts_within_cap() {
+        assert!(validate_table_dims(DOCS_TABLE_MAX_ROWS, DOCS_TABLE_MAX_COLS).is_ok());
+    }
 }

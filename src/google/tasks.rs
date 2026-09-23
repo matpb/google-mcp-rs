@@ -6,8 +6,11 @@ use reqwest::Method;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::http::{
+    InvalidPathSegment, MAX_API_RESPONSE_BYTES, ReadBodyError, read_body_capped, seg,
+};
+
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum TasksError {
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
@@ -15,6 +18,25 @@ pub enum TasksError {
     Api { status: StatusCode, message: String },
     #[error("could not parse Tasks response: {0}")]
     Parse(serde_json::Error),
+    #[error("invalid id: {0}")]
+    InvalidId(String),
+    #[error("response body exceeds the {cap}-byte cap (at least {actual} bytes)")]
+    TooLarge { cap: usize, actual: usize },
+}
+
+impl From<InvalidPathSegment> for TasksError {
+    fn from(e: InvalidPathSegment) -> Self {
+        TasksError::InvalidId(e.0)
+    }
+}
+
+impl From<ReadBodyError> for TasksError {
+    fn from(e: ReadBodyError) -> Self {
+        match e {
+            ReadBodyError::Http(e) => TasksError::Http(e),
+            ReadBodyError::TooLarge { cap, actual } => TasksError::TooLarge { cap, actual },
+        }
+    }
 }
 
 const BASE: &str = "https://tasks.googleapis.com/tasks/v1";
@@ -55,6 +77,7 @@ impl TasksClient {
     }
 
     pub async fn get_tasklist(&self, tasklist_id: &str) -> Result<Value, TasksError> {
+        let tasklist_id = seg(tasklist_id)?;
         self.request(
             Method::GET,
             format!("{BASE}/users/@me/lists/{tasklist_id}"),
@@ -81,6 +104,7 @@ impl TasksClient {
         title: &str,
     ) -> Result<Value, TasksError> {
         let body = serde_json::json!({"id": tasklist_id, "title": title});
+        let tasklist_id = seg(tasklist_id)?;
         self.request(
             Method::PATCH,
             format!("{BASE}/users/@me/lists/{tasklist_id}"),
@@ -91,6 +115,7 @@ impl TasksClient {
     }
 
     pub async fn delete_tasklist(&self, tasklist_id: &str) -> Result<Value, TasksError> {
+        let tasklist_id = seg(tasklist_id)?;
         self.request(
             Method::DELETE,
             format!("{BASE}/users/@me/lists/{tasklist_id}"),
@@ -115,6 +140,7 @@ impl TasksClient {
         max_results: Option<u32>,
         page_token: Option<&str>,
     ) -> Result<Value, TasksError> {
+        let tasklist_id = seg(tasklist_id)?;
         let mut q: Vec<(String, String)> = vec![
             ("showCompleted".into(), show_completed.to_string()),
             ("showHidden".into(), show_hidden.to_string()),
@@ -147,6 +173,8 @@ impl TasksClient {
     }
 
     pub async fn get_task(&self, tasklist_id: &str, task_id: &str) -> Result<Value, TasksError> {
+        let tasklist_id = seg(tasklist_id)?;
+        let task_id = seg(task_id)?;
         self.request(
             Method::GET,
             format!("{BASE}/lists/{tasklist_id}/tasks/{task_id}"),
@@ -163,6 +191,7 @@ impl TasksClient {
         parent: Option<&str>,
         previous: Option<&str>,
     ) -> Result<Value, TasksError> {
+        let tasklist_id = seg(tasklist_id)?;
         let mut q: Vec<(String, String)> = vec![];
         if let Some(p) = parent {
             q.push(("parent".into(), p.into()));
@@ -185,6 +214,8 @@ impl TasksClient {
         task_id: &str,
         body: &Value,
     ) -> Result<Value, TasksError> {
+        let tasklist_id = seg(tasklist_id)?;
+        let task_id = seg(task_id)?;
         self.request(
             Method::PATCH,
             format!("{BASE}/lists/{tasklist_id}/tasks/{task_id}"),
@@ -195,6 +226,8 @@ impl TasksClient {
     }
 
     pub async fn delete_task(&self, tasklist_id: &str, task_id: &str) -> Result<Value, TasksError> {
+        let tasklist_id = seg(tasklist_id)?;
+        let task_id = seg(task_id)?;
         self.request(
             Method::DELETE,
             format!("{BASE}/lists/{tasklist_id}/tasks/{task_id}"),
@@ -212,6 +245,8 @@ impl TasksClient {
         previous: Option<&str>,
         destination_tasklist: Option<&str>,
     ) -> Result<Value, TasksError> {
+        let tasklist_id = seg(tasklist_id)?;
+        let task_id = seg(task_id)?;
         let mut q: Vec<(String, String)> = vec![];
         if let Some(p) = parent {
             q.push(("parent".into(), p.into()));
@@ -232,6 +267,7 @@ impl TasksClient {
     }
 
     pub async fn clear_completed(&self, tasklist_id: &str) -> Result<Value, TasksError> {
+        let tasklist_id = seg(tasklist_id)?;
         self.request(
             Method::POST,
             format!("{BASE}/lists/{tasklist_id}/clear"),
@@ -264,16 +300,16 @@ impl TasksClient {
         }
         let resp = req.send().await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         if status.is_success() {
-            if text.is_empty() {
+            if bytes.is_empty() {
                 return Ok(serde_json::json!({}));
             }
-            return serde_json::from_str(&text).map_err(TasksError::Parse);
+            return serde_json::from_slice(&bytes).map_err(TasksError::Parse);
         }
         Err(TasksError::Api {
             status,
-            message: text.chars().take(800).collect(),
+            message: String::from_utf8_lossy(&bytes).chars().take(800).collect(),
         })
     }
 }

@@ -10,9 +10,11 @@ use rusqlite::params;
 use super::{Db, DbError, now_secs};
 
 const CODE_TTL_SECS: i64 = 300;
-const STATE_TTL_SECS: i64 = 300;
+const STATE_TTL_SECS: i64 = 600;
 
+/// Maps `oauth_codes` rows 1:1; some fields are set on read but not yet consumed by callers.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OauthCode {
     pub code: String,
     pub mcp_client_id: String,
@@ -23,7 +25,9 @@ pub struct OauthCode {
     pub expires_at: i64,
 }
 
+/// Maps `oauth_states` rows 1:1; some fields are set on read but not yet consumed by callers.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OauthState {
     pub state_id: String,
     pub mcp_client_id: String,
@@ -33,6 +37,10 @@ pub struct OauthState {
     pub code_challenge_method: String,
     pub resource: Option<String>,
     pub expires_at: i64,
+    /// SHA-256 hex of the browser-binding cookie secret.
+    pub browser_binding: Option<String>,
+    pub approved: bool,
+    pub login_hint: Option<String>,
 }
 
 pub struct InsertCode {
@@ -52,6 +60,8 @@ pub struct InsertState {
     pub code_challenge: String,
     pub code_challenge_method: String,
     pub resource: Option<String>,
+    pub browser_binding: String,
+    pub login_hint: Option<String>,
 }
 
 pub async fn insert_code(db: &Db, req: InsertCode) -> Result<(), DbError> {
@@ -120,8 +130,9 @@ pub async fn insert_state(db: &Db, req: InsertState) -> Result<(), DbError> {
         conn.execute(
             "INSERT INTO oauth_states
                 (state_id, mcp_client_id, mcp_redirect_uri, mcp_state,
-                 code_challenge, code_challenge_method, resource, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 code_challenge, code_challenge_method, resource, expires_at,
+                 browser_binding, login_hint)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 req.state_id,
                 req.mcp_client_id,
@@ -131,9 +142,63 @@ pub async fn insert_state(db: &Db, req: InsertState) -> Result<(), DbError> {
                 req.code_challenge_method,
                 req.resource,
                 expires_at,
+                req.browser_binding,
+                req.login_hint,
             ],
         )?;
         Ok(())
+    })
+    .await
+}
+
+const STATE_COLUMNS: &str = "state_id, mcp_client_id, mcp_redirect_uri, mcp_state,
+                        code_challenge, code_challenge_method, resource, expires_at,
+                        browser_binding, approved, login_hint";
+
+fn row_to_state(r: &rusqlite::Row) -> rusqlite::Result<OauthState> {
+    Ok(OauthState {
+        state_id: r.get(0)?,
+        mcp_client_id: r.get(1)?,
+        mcp_redirect_uri: r.get(2)?,
+        mcp_state: r.get(3)?,
+        code_challenge: r.get(4)?,
+        code_challenge_method: r.get(5)?,
+        resource: r.get(6)?,
+        expires_at: r.get(7)?,
+        browser_binding: r.get(8)?,
+        approved: r.get::<_, i64>(9)? != 0,
+        login_hint: r.get(10)?,
+    })
+}
+
+/// Fetch a state without consuming it. Used by the consent POST handler,
+/// which must be able to validate before deciding to approve or deny.
+pub async fn get_state(db: &Db, state_id: &str) -> Result<Option<OauthState>, DbError> {
+    let state_id = state_id.to_string();
+    db.call(move |conn| {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {STATE_COLUMNS} FROM oauth_states WHERE state_id = ?1"
+        ))?;
+        match stmt.query_row([&state_id], row_to_state) {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await
+}
+
+/// Set `approved` on an unexpired state; `false` means missing or expired.
+pub async fn mark_approved(db: &Db, state_id: &str) -> Result<bool, DbError> {
+    let state_id = state_id.to_string();
+    let now = now_secs();
+    db.call(move |conn| {
+        let n = conn.execute(
+            "UPDATE oauth_states SET approved = 1
+             WHERE state_id = ?1 AND expires_at >= ?2",
+            params![state_id, now],
+        )?;
+        Ok(n > 0)
     })
     .await
 }
@@ -143,23 +208,10 @@ pub async fn consume_state(db: &Db, state_id: &str) -> Result<Option<OauthState>
     db.call(move |conn| {
         let tx = conn.transaction()?;
         let row: Option<OauthState> = {
-            let mut stmt = tx.prepare(
-                "SELECT state_id, mcp_client_id, mcp_redirect_uri, mcp_state,
-                        code_challenge, code_challenge_method, resource, expires_at
-                 FROM oauth_states WHERE state_id = ?1",
-            )?;
-            let result = stmt.query_row([&state_id], |r| {
-                Ok(OauthState {
-                    state_id: r.get(0)?,
-                    mcp_client_id: r.get(1)?,
-                    mcp_redirect_uri: r.get(2)?,
-                    mcp_state: r.get(3)?,
-                    code_challenge: r.get(4)?,
-                    code_challenge_method: r.get(5)?,
-                    resource: r.get(6)?,
-                    expires_at: r.get(7)?,
-                })
-            });
+            let mut stmt = tx.prepare(&format!(
+                "SELECT {STATE_COLUMNS} FROM oauth_states WHERE state_id = ?1"
+            ))?;
+            let result = stmt.query_row([&state_id], row_to_state);
             match result {
                 Ok(r) => Some(r),
                 Err(rusqlite::Error::QueryReturnedNoRows) => None,
@@ -273,6 +325,8 @@ mod tests {
                 code_challenge: "ch".to_string(),
                 code_challenge_method: "S256".to_string(),
                 resource: None,
+                browser_binding: "deadbeef".to_string(),
+                login_hint: None,
             },
         )
         .await
@@ -281,7 +335,36 @@ mod tests {
         let s = consume_state(&db, "s-1").await.unwrap().expect("present");
         assert_eq!(s.state_id, "s-1");
         assert_eq!(s.mcp_state.as_deref(), Some("client-state"));
+        assert_eq!(s.browser_binding.as_deref(), Some("deadbeef"));
+        assert!(!s.approved);
         assert!(consume_state(&db, "s-1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_approved_is_idempotent_and_rejects_unknown_state() {
+        let db = Db::open_in_memory().await.unwrap();
+        seed_client(&db, "cid").await;
+        insert_state(
+            &db,
+            InsertState {
+                state_id: "s-2".to_string(),
+                mcp_client_id: "cid".to_string(),
+                mcp_redirect_uri: "https://x/cb".to_string(),
+                mcp_state: None,
+                code_challenge: "ch".to_string(),
+                code_challenge_method: "S256".to_string(),
+                resource: None,
+                browser_binding: "abc".to_string(),
+                login_hint: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(mark_approved(&db, "s-2").await.unwrap());
+        let s = get_state(&db, "s-2").await.unwrap().expect("present");
+        assert!(s.approved);
+        assert!(mark_approved(&db, "s-2").await.unwrap());
+        assert!(!mark_approved(&db, "missing").await.unwrap());
     }
 
     #[tokio::test]

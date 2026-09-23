@@ -27,6 +27,101 @@ pub enum MimeError {
 /// 25 MB outgoing limit for MIME framing overhead.
 pub const MAX_MESSAGE_BYTES: usize = 24 * 1024 * 1024;
 
+/// RFC 5321 4.5.3.1.3 total address length cap.
+const MAX_ADDRESS_BYTES: usize = 320;
+
+/// Chars that would break the addr-spec or escape mail-builder's `<...>` framing.
+const FORBIDDEN_ADDRESS_CHARS: &[char] = &['<', '>', '(', ')', ',', ';', ':', '"', '[', ']', '\\'];
+
+fn has_control_chars(s: &str, allow_tab: bool) -> bool {
+    s.chars()
+        .any(|c| (c.is_control() && !(allow_tab && c == '\t')) || c == '\u{7f}')
+}
+
+/// Rejects a free-text header value that could inject a header line via CR/LF.
+fn validate_header_text(field: &str, value: &str) -> Result<(), MimeError> {
+    if has_control_chars(value, true) {
+        return Err(MimeError::Build(format!(
+            "{field}: contains control characters (CR/LF not allowed in header values)"
+        )));
+    }
+    Ok(())
+}
+
+/// Strict addr-spec check for a value written raw into a `<...>` header token.
+fn validate_address(field: &str, email: &str) -> Result<(), MimeError> {
+    let e = email;
+    if e.is_empty() {
+        return Err(MimeError::Build(format!("{field}: email is required")));
+    }
+    if e.len() > MAX_ADDRESS_BYTES {
+        return Err(MimeError::Build(format!(
+            "{field}: email exceeds {MAX_ADDRESS_BYTES} bytes"
+        )));
+    }
+    if has_control_chars(e, false) {
+        return Err(MimeError::Build(format!(
+            "{field}: email contains control characters"
+        )));
+    }
+    if e.chars().any(char::is_whitespace) {
+        return Err(MimeError::Build(format!(
+            "{field}: email must not contain whitespace"
+        )));
+    }
+    if e.chars().any(|c| FORBIDDEN_ADDRESS_CHARS.contains(&c)) {
+        return Err(MimeError::Build(format!(
+            "{field}: email contains a forbidden character"
+        )));
+    }
+    if e.matches('@').count() != 1 {
+        return Err(MimeError::Build(format!(
+            "{field}: email must contain exactly one '@'"
+        )));
+    }
+    let (local, domain) = e.split_once('@').unwrap();
+    if local.is_empty() || domain.is_empty() {
+        return Err(MimeError::Build(format!(
+            "{field}: email must have a non-empty local part and domain"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_recipient(field: &str, r: &Recipient) -> Result<(), MimeError> {
+    validate_address(&format!("{field}.email"), &r.email)?;
+    if let Some(name) = &r.name {
+        validate_header_text(&format!("{field}.name"), name)?;
+    }
+    Ok(())
+}
+
+fn validate_recipients(field: &str, rs: &[Recipient]) -> Result<(), MimeError> {
+    for (i, r) in rs.iter().enumerate() {
+        validate_recipient(&format!("{field}[{i}]"), r)?;
+    }
+    Ok(())
+}
+
+/// Validates an upstream (hostile-sender) Message-Id/References token.
+/// Returns `None` rather than erring; the send must still proceed.
+fn sanitize_message_id(raw: &str) -> Option<String> {
+    let id = strip_brackets(raw).trim();
+    if id.is_empty() || id.len() > 998 {
+        return None;
+    }
+    if has_control_chars(id, false) || id.chars().any(char::is_whitespace) {
+        return None;
+    }
+    if id.contains('<') || id.contains('>') {
+        return None;
+    }
+    if id.matches('@').count() != 1 {
+        return None;
+    }
+    Some(id.to_string())
+}
+
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct Recipient {
     pub email: String,
@@ -49,10 +144,10 @@ pub struct AttachmentInput {
     /// remote clients — prefer `path` on a local deployment.
     #[serde(default)]
     pub data_base64: Option<String>,
-    /// Path to read the attachment from, inside the server's FILE_ROOT
+    /// Path to read the attachment from, inside the server's `FILE_ROOT`
     /// exchange directory (absolute under it, or relative to it). The
     /// preferred, token-free way to attach a local file. Requires the
-    /// operator to have enabled FILE_ROOT.
+    /// operator to have enabled `FILE_ROOT`.
     #[serde(default)]
     pub path: Option<String>,
     /// Drive file ID to attach directly. The server downloads the bytes
@@ -187,13 +282,17 @@ fn rewrite_subject(reply: &Option<ReplyContext>, supplied: &str) -> String {
     let Some(ctx) = reply else {
         return supplied.to_string();
     };
+    // The upstream subject is hostile-sender content: neutralize, don't fail.
     let base = if !supplied.is_empty() {
-        supplied
+        supplied.to_string()
     } else {
-        ctx.subject.as_str()
+        ctx.subject
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect()
     };
-    if has_re_prefix(base) {
-        base.to_string()
+    if has_re_prefix(&base) {
+        base
     } else {
         format!("Re: {base}")
     }
@@ -215,11 +314,20 @@ pub fn compose(req: Compose) -> Result<Vec<u8>, MimeError> {
     if req.to.is_empty() && req.cc.is_empty() && req.bcc.is_empty() {
         return Err(MimeError::NoRecipients);
     }
+    validate_recipient("from", &req.from)?;
+    validate_recipients("to", &req.to)?;
+    validate_recipients("cc", &req.cc)?;
+    validate_recipients("bcc", &req.bcc)?;
+    for (i, att) in req.attachments.iter().enumerate() {
+        validate_header_text(&format!("attachments[{i}].filename"), &att.filename)?;
+    }
+
     let from_addr = Address::Address(EmailAddress {
         name: req.from.name.as_deref().map(Cow::Borrowed),
         email: Cow::Borrowed(req.from.email.as_str()),
     });
 
+    validate_header_text("subject", &req.subject)?;
     let subject = rewrite_subject(&req.reply, &req.subject);
 
     let mut b = MessageBuilder::new().from(from_addr).subject(subject);
@@ -234,20 +342,22 @@ pub fn compose(req: Compose) -> Result<Vec<u8>, MimeError> {
     }
 
     if let Some(reply) = &req.reply {
-        // mail-builder wraps every message id in <...> on serialization,
-        // so we strip any surrounding brackets that callers may have left
-        // on (Gmail-API-returned `Message-Id` header values include them).
-        let canonical_id = strip_brackets(&reply.message_id).to_string();
-        b = b.in_reply_to(canonical_id.clone());
-        let mut chain: Vec<String> = reply
-            .references
-            .iter()
-            .map(|s| strip_brackets(s).to_string())
-            .collect();
-        if !chain.iter().any(|s| s == &canonical_id) {
-            chain.push(canonical_id);
+        // mail-builder wraps every message id in <...>, and message ids come
+        // from a hostile sender, so a malformed id is dropped, not fatal.
+        if let Some(canonical_id) = sanitize_message_id(&reply.message_id) {
+            b = b.in_reply_to(canonical_id.clone());
+            let mut chain: Vec<String> = reply
+                .references
+                .iter()
+                .filter_map(|s| sanitize_message_id(s))
+                .collect();
+            if !chain.iter().any(|s| s == &canonical_id) {
+                chain.push(canonical_id);
+            }
+            b = b.references(chain);
+        } else {
+            tracing::debug!("dropped malformed upstream Message-Id from reply chain");
         }
-        b = b.references(chain);
     }
 
     if let Some(text) = req.body_text.as_deref() {
@@ -524,5 +634,128 @@ mod tests {
         // Lenient about unbalanced brackets (Gmail-returned headers are well-formed).
         assert_eq!(strip_brackets("<unbalanced"), "unbalanced");
         assert_eq!(strip_brackets("unbalanced>"), "unbalanced");
+    }
+
+    // -- header injection hardening --------------------------------------
+
+    #[test]
+    fn recipient_email_with_crlf_is_rejected() {
+        let err = compose(Compose {
+            to: vec![rcpt("a@x.com>\r\nBcc: evil@y.com")],
+            ..base()
+        })
+        .unwrap_err();
+        assert!(matches!(err, MimeError::Build(_)));
+    }
+
+    #[test]
+    fn recipient_email_with_angle_bracket_is_rejected() {
+        let err = compose(Compose {
+            to: vec![rcpt("a@x.com>")],
+            ..base()
+        })
+        .unwrap_err();
+        assert!(matches!(err, MimeError::Build(_)));
+    }
+
+    #[test]
+    fn valid_addresses_with_plus_tag_and_subdomain_are_accepted() {
+        let s = as_string(Compose {
+            to: vec![rcpt("user+tag@mail.sub.example.com")],
+            ..base()
+        });
+        assert!(s.contains("user+tag@mail.sub.example.com"));
+        assert!(!s.lines().any(|l| l.starts_with("Bcc: evil")));
+    }
+
+    #[test]
+    fn display_name_with_newline_is_rejected() {
+        let err = compose(Compose {
+            to: vec![named("Evil\r\nBcc: evil@y.com", "a@x.com")],
+            ..base()
+        })
+        .unwrap_err();
+        assert!(matches!(err, MimeError::Build(_)));
+    }
+
+    #[test]
+    fn subject_with_crlf_is_rejected() {
+        let err = compose(Compose {
+            subject: "Hi\r\nBcc: evil@y.com".into(),
+            ..base()
+        })
+        .unwrap_err();
+        assert!(matches!(err, MimeError::Build(_)));
+    }
+
+    #[test]
+    fn attachment_filename_with_crlf_is_rejected() {
+        let att = ResolvedAttachment {
+            filename: "f.txt\r\nBcc: evil@y.com".into(),
+            mime_type: "text/plain".into(),
+            bytes: b"x".to_vec(),
+        };
+        let err = compose(Compose {
+            attachments: vec![att],
+            ..base()
+        })
+        .unwrap_err();
+        assert!(matches!(err, MimeError::Build(_)));
+    }
+
+    #[test]
+    fn malicious_upstream_message_id_is_dropped_but_send_still_composes() {
+        let s = as_string(Compose {
+            reply: Some(ReplyContext {
+                message_id: "evil\r\nBcc: evil@y.com".into(),
+                references: vec![],
+                subject: "Hi".into(),
+            }),
+            ..base()
+        });
+        assert!(!s.contains("In-Reply-To:"));
+        assert!(!s.lines().any(|l| l.starts_with("Bcc: evil")));
+    }
+
+    #[test]
+    fn hostile_upstream_subject_is_neutralized_not_fatal() {
+        let s = as_string(Compose {
+            subject: String::new(),
+            reply: Some(ReplyContext {
+                message_id: "<good@x.com>".into(),
+                references: vec![],
+                subject: "Hi\r\nBcc: evil@y.com".into(),
+            }),
+            ..base()
+        });
+        assert!(!s.lines().any(|l| l.starts_with("Bcc: evil")));
+        assert!(s.contains("Re: Hi"));
+    }
+
+    #[test]
+    fn email_with_surrounding_whitespace_is_rejected() {
+        let err = compose(Compose {
+            to: vec![rcpt(" a@x.com")],
+            ..base()
+        })
+        .unwrap_err();
+        assert!(matches!(err, MimeError::Build(_)));
+    }
+
+    #[test]
+    fn valid_upstream_message_id_is_kept_in_in_reply_to_and_references() {
+        let s = as_string(Compose {
+            reply: Some(ReplyContext {
+                message_id: "<good@x.com>".into(),
+                references: vec!["<bad one>".into(), "<root@x.com>".into()],
+                subject: "Hi".into(),
+            }),
+            ..base()
+        });
+        assert!(s.contains("In-Reply-To: <good@x.com>"));
+        assert!(s.contains("References:"));
+        assert!(s.contains("<root@x.com>"));
+        assert!(s.contains("<good@x.com>"));
+        assert!(!s.contains("<bad one>"));
     }
 }

@@ -8,7 +8,6 @@ use crate::files::{FileJail, FileMaintenance};
 ///
 /// The `Debug` impl deliberately redacts every secret-bearing field. Never
 /// derive `Debug`, never log the struct via `?cfg` without going through this impl.
-#[allow(dead_code)] // fields wired up in Phase 1 (storage) and Phase 2 (OAuth)
 pub struct ServerConfig {
     pub host: IpAddr,
     pub port: u16,
@@ -19,7 +18,12 @@ pub struct ServerConfig {
     pub storage_encryption_key: [u8; 32],
     pub database_url: String,
     pub cors_allow_localhost: bool,
+    /// Extra `Host`/`X-Forwarded-Host` entries allowed beyond loopback and
+    /// `BASE_URL`'s host, from `ALLOWED_HOSTS` (comma-separated).
+    pub allowed_hosts: Vec<String>,
     pub enabled_domains: Vec<Domain>,
+    /// Optional allowlist from `ALLOWED_GOOGLE_ACCOUNTS`; empty means no restriction.
+    pub allowed_google_accounts: Vec<AllowedAccountEntry>,
     /// Jailed host directory for filesystem-based file exchange. `Some` when
     /// `FILE_ROOT` is set (and bind-mounted into the container); `None`
     /// disables path-based reads/writes so tools fall back to base64.
@@ -69,11 +73,23 @@ impl ServerConfig {
             optional_env("DATABASE_URL").unwrap_or_else(|| "./google-mcp.db".to_string());
 
         let cors_allow_localhost = optional_env("CORS_ALLOW_LOCALHOST")
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
+            .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+
+        let allowed_hosts = optional_env("ALLOWED_HOSTS")
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let enabled_domains = domain::parse_enabled(optional_env("ENABLED_DOMAINS").as_deref())
             .map_err(ConfigError::InvalidDomain)?;
+
+        let allowed_google_accounts =
+            parse_allowed_accounts(optional_env("ALLOWED_GOOGLE_ACCOUNTS").as_deref());
 
         let file_jail = FileJail::from_env(optional_env("FILE_ROOT").as_deref())
             .map_err(|e| ConfigError::InvalidFileRoot(e.to_string()))?;
@@ -92,17 +108,63 @@ impl ServerConfig {
             storage_encryption_key,
             database_url,
             cors_allow_localhost,
+            allowed_hosts,
             enabled_domains,
+            allowed_google_accounts,
             file_jail,
             file_maintenance,
         })
     }
 
     /// Convenience: full Google redirect URI registered in the GCP console.
-    #[allow(dead_code)] // wired up in Phase 2 (OAuth proxy)
     pub fn google_redirect_uri(&self) -> String {
         format!("{}/oauth/google/callback", self.base_url)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowedAccountEntry {
+    Email(String),
+    /// Domain without the leading `@`.
+    Domain(String),
+}
+
+fn parse_allowed_accounts(raw: Option<&str>) -> Vec<AllowedAccountEntry> {
+    let Some(s) = raw else { return Vec::new() };
+    s.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| match s.strip_prefix('@') {
+            Some(domain) => AllowedAccountEntry::Domain(domain.to_ascii_lowercase()),
+            None => AllowedAccountEntry::Email(s.to_ascii_lowercase()),
+        })
+        .collect()
+}
+
+/// Matches an `hd` claim (from the `id_token`, at first sign-in).
+pub fn account_allowed(entries: &[AllowedAccountEntry], email: &str, hd: Option<&str>) -> bool {
+    if entries.is_empty() {
+        return true;
+    }
+    let email_l = email.to_ascii_lowercase();
+    entries.iter().any(|e| match e {
+        AllowedAccountEntry::Email(allowed) => *allowed == email_l,
+        AllowedAccountEntry::Domain(d) => hd.is_some_and(|h| h.eq_ignore_ascii_case(d)),
+    })
+}
+
+/// Matches the email's own domain suffix (no `hd` stored on the account row).
+pub fn account_allowed_by_email(entries: &[AllowedAccountEntry], email: &str) -> bool {
+    if entries.is_empty() {
+        return true;
+    }
+    let email_l = email.to_ascii_lowercase();
+    entries.iter().any(|e| match e {
+        AllowedAccountEntry::Email(allowed) => *allowed == email_l,
+        AllowedAccountEntry::Domain(d) => email_l
+            .rsplit_once('@')
+            .is_some_and(|(_, dom)| dom == d.as_str()),
+    })
 }
 
 fn required(key: &'static str) -> Result<String, ConfigError> {
@@ -156,7 +218,9 @@ impl fmt::Debug for ServerConfig {
             .field("storage_encryption_key", &Redacted)
             .field("database_url", &self.database_url)
             .field("cors_allow_localhost", &self.cors_allow_localhost)
+            .field("allowed_hosts", &self.allowed_hosts)
             .field("enabled_domains", &self.enabled_domains)
+            .field("allowed_google_accounts", &self.allowed_google_accounts)
             .field("file_jail", &self.file_jail)
             .field("file_maintenance", &self.file_maintenance)
             .finish()
@@ -180,8 +244,13 @@ mod tests {
     // would stomp each other's env vars.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    // SAFETY: ENV_LOCK serializes every caller, so no other thread reads or
+    // writes the environment while this function runs.
+    #[allow(unsafe_code)]
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved: Vec<_> = vars
             .iter()
             .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
@@ -239,6 +308,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_allowed_hosts_csv() {
+        with_env(
+            &[
+                ("BASE_URL", Some("http://localhost:8433")),
+                ("GOOGLE_CLIENT_ID", Some("a")),
+                ("GOOGLE_CLIENT_SECRET", Some("b")),
+                ("JWT_SECRET", Some(valid_jwt_secret())),
+                ("STORAGE_ENCRYPTION_KEY", Some(valid_storage_key())),
+                (
+                    "ALLOWED_HOSTS",
+                    Some(" tunnel.example.net:8080 , other.example.com "),
+                ),
+            ],
+            || {
+                let cfg = ServerConfig::from_env().expect("config");
+                assert_eq!(
+                    cfg.allowed_hosts,
+                    vec!["tunnel.example.net:8080", "other.example.com"]
+                );
+            },
+        );
+    }
+
+    #[test]
     fn debug_redacts_secrets() {
         with_env(
             &[
@@ -279,6 +372,43 @@ mod tests {
                 ));
             },
         );
+    }
+
+    #[test]
+    fn allowed_accounts_email_case_insensitive() {
+        let entries = parse_allowed_accounts(Some("User@Example.com"));
+        assert!(account_allowed(&entries, "user@example.com", None));
+        assert!(account_allowed_by_email(&entries, "USER@EXAMPLE.COM"));
+        assert!(!account_allowed(&entries, "other@example.com", None));
+    }
+
+    #[test]
+    fn allowed_accounts_domain_matches_hd_not_email_suffix() {
+        let entries = parse_allowed_accounts(Some("@example.com"));
+        assert!(account_allowed(
+            &entries,
+            "anyone@else.com",
+            Some("example.com")
+        ));
+        assert!(!account_allowed(&entries, "anyone@example.com", None));
+        assert!(!account_allowed(
+            &entries,
+            "anyone@example.com",
+            Some("other.com")
+        ));
+    }
+
+    #[test]
+    fn allowed_accounts_domain_by_email_suffix() {
+        let entries = parse_allowed_accounts(Some("@example.com"));
+        assert!(account_allowed_by_email(&entries, "anyone@example.com"));
+        assert!(!account_allowed_by_email(&entries, "anyone@evil.com"));
+    }
+
+    #[test]
+    fn allowed_accounts_empty_means_unrestricted() {
+        let entries = parse_allowed_accounts(None);
+        assert!(account_allowed(&entries, "anyone@anywhere.com", None));
     }
 
     #[test]

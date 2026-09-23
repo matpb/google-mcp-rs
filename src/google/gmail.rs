@@ -10,8 +10,12 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::http::{
+    InvalidPathSegment, MAX_API_RESPONSE_BYTES, MAX_DOWNLOAD_BYTES, ReadBodyError,
+    read_body_capped, seg,
+};
+
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)] // Invalid is held for future client-side validations
 pub enum GmailError {
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
@@ -25,6 +29,25 @@ pub enum GmailError {
     Parse(serde_json::Error),
     #[error("invalid input: {0}")]
     Invalid(&'static str),
+    #[error("invalid id: {0}")]
+    InvalidId(String),
+    #[error("response body exceeds the {cap}-byte cap (at least {actual} bytes)")]
+    TooLarge { cap: usize, actual: usize },
+}
+
+impl From<InvalidPathSegment> for GmailError {
+    fn from(e: InvalidPathSegment) -> Self {
+        GmailError::InvalidId(e.0)
+    }
+}
+
+impl From<ReadBodyError> for GmailError {
+    fn from(e: ReadBodyError) -> Self {
+        match e {
+            ReadBodyError::Http(e) => GmailError::Http(e),
+            ReadBodyError::TooLarge { cap, actual } => GmailError::TooLarge { cap, actual },
+        }
+    }
 }
 
 const BASE: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -166,6 +189,7 @@ impl GmailClient {
     }
 
     pub async fn get_thread(&self, id: &str, format: Option<&str>) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         let mut query = vec![];
         if let Some(f) = format {
             query.push(("format".into(), f.into()));
@@ -180,6 +204,7 @@ impl GmailClient {
     }
 
     pub async fn modify_thread(&self, id: &str, body: &ModifyLabels) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         self.request(
             Method::POST,
             format!("{BASE}/threads/{id}/modify"),
@@ -190,6 +215,7 @@ impl GmailClient {
     }
 
     pub async fn trash_thread(&self, id: &str) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         self.request(
             Method::POST,
             format!("{BASE}/threads/{id}/trash"),
@@ -235,6 +261,7 @@ impl GmailClient {
         format: Option<&str>,
         metadata_headers: &[String],
     ) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         let mut query = vec![];
         if let Some(f) = format {
             query.push(("format".into(), f.into()));
@@ -252,6 +279,7 @@ impl GmailClient {
     }
 
     pub async fn modify_message(&self, id: &str, body: &ModifyLabels) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         self.request(
             Method::POST,
             format!("{BASE}/messages/{id}/modify"),
@@ -262,6 +290,7 @@ impl GmailClient {
     }
 
     pub async fn trash_message(&self, id: &str) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         self.request(
             Method::POST,
             format!("{BASE}/messages/{id}/trash"),
@@ -296,13 +325,26 @@ impl GmailClient {
         message_id: &str,
         attachment_id: &str,
     ) -> Result<Value, GmailError> {
-        self.request(
-            Method::GET,
-            format!("{BASE}/messages/{message_id}/attachments/{attachment_id}"),
-            None::<&()>,
-            &[],
-        )
-        .await
+        let message_id = seg(message_id)?;
+        let attachment_id = seg(attachment_id)?;
+        let resp = self
+            .send_raw(
+                Method::GET,
+                format!("{BASE}/messages/{message_id}/attachments/{attachment_id}"),
+                None::<&()>,
+                &[],
+            )
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
+            return Err(parse_error(status, &String::from_utf8_lossy(&bytes)));
+        }
+        let bytes = read_body_capped(resp, MAX_DOWNLOAD_BYTES).await?;
+        if bytes.is_empty() {
+            return Ok(json!({}));
+        }
+        serde_json::from_slice(&bytes).map_err(GmailError::Parse)
     }
 
     // --- drafts ----------------------------------------------------------
@@ -328,6 +370,7 @@ impl GmailClient {
     }
 
     pub async fn get_draft(&self, id: &str, format: Option<&str>) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         let mut query = vec![];
         if let Some(f) = format {
             query.push(("format".into(), f.into()));
@@ -361,6 +404,7 @@ impl GmailClient {
         raw_b64url: &str,
         thread_id: Option<&str>,
     ) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         let message = match thread_id {
             Some(tid) => json!({"raw": raw_b64url, "threadId": tid}),
             None => json!({"raw": raw_b64url}),
@@ -382,6 +426,7 @@ impl GmailClient {
     }
 
     pub async fn delete_draft(&self, id: &str) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         self.request_empty_ok(Method::DELETE, format!("{BASE}/drafts/{id}"), None::<&()>)
             .await
     }
@@ -394,6 +439,7 @@ impl GmailClient {
     }
 
     pub async fn get_label(&self, id: &str) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         self.request(Method::GET, format!("{BASE}/labels/{id}"), None::<&()>, &[])
             .await
     }
@@ -404,6 +450,7 @@ impl GmailClient {
     }
 
     pub async fn update_label(&self, id: &str, body: &UpdateLabel) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         self.request(
             Method::PATCH,
             format!("{BASE}/labels/{id}"),
@@ -414,6 +461,7 @@ impl GmailClient {
     }
 
     pub async fn delete_label(&self, id: &str) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         self.request_empty_ok(Method::DELETE, format!("{BASE}/labels/{id}"), None::<&()>)
             .await
     }
@@ -441,6 +489,7 @@ impl GmailClient {
     }
 
     pub async fn delete_filter(&self, id: &str) -> Result<Value, GmailError> {
+        let id = seg(id)?;
         self.request_empty_ok(
             Method::DELETE,
             format!("{BASE}/settings/filters/{id}"),
@@ -460,7 +509,8 @@ impl GmailClient {
     ) -> Result<Value, GmailError> {
         let resp = self.send_raw(method, url, body, query).await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
+        let text = String::from_utf8_lossy(&bytes);
         if status.is_success() {
             if text.is_empty() {
                 return Ok(json!({}));
@@ -478,11 +528,11 @@ impl GmailClient {
     ) -> Result<Value, GmailError> {
         let resp = self.send_raw(method, url, body, &[]).await?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = read_body_capped(resp, MAX_API_RESPONSE_BYTES).await?;
         if status.is_success() {
             return Ok(json!({"ok": true}));
         }
-        Err(parse_error(status, &text))
+        Err(parse_error(status, &String::from_utf8_lossy(&bytes)))
     }
 
     async fn send_raw<B: Serialize + ?Sized>(

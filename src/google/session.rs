@@ -10,13 +10,15 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, RwLock};
 
+use crate::config::AllowedAccountEntry;
 use crate::oauth::GoogleOAuthError;
 use crate::oauth::google::GoogleOAuthClient;
 use crate::oauth::jwt::now_secs;
-use crate::storage::{Db, DbError, accounts};
+use crate::storage::{Db, DbError, accounts, revocations};
 
+/// Cache entry shape; `google_sub`/`expires_at` are set on insert but not read back by callers yet.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // `expires_at` surfaces to tools that want to expose it.
+#[allow(dead_code)]
 pub struct GoogleAccountSession {
     pub google_sub: String,
     pub email: String,
@@ -31,6 +33,8 @@ pub enum SessionError {
     AccountNotFound,
     #[error("Google account has been disconnected (refresh token revoked); reconnect required")]
     ReconnectRequired,
+    #[error("this Google account is no longer in ALLOWED_GOOGLE_ACCOUNTS")]
+    AccountNotAllowed,
     #[error("storage: {0}")]
     Storage(#[from] DbError),
     #[error("google: {0}")]
@@ -58,10 +62,16 @@ struct State {
     storage_key: [u8; 32],
     db: Db,
     google: Arc<GoogleOAuthClient>,
+    allowed_accounts: Vec<AllowedAccountEntry>,
 }
 
 impl SessionCache {
-    pub fn new(db: Db, google: Arc<GoogleOAuthClient>, storage_key: [u8; 32]) -> Self {
+    pub fn new(
+        db: Db,
+        google: Arc<GoogleOAuthClient>,
+        storage_key: [u8; 32],
+        allowed_accounts: Vec<AllowedAccountEntry>,
+    ) -> Self {
         Self {
             state: Arc::new(State {
                 cache: RwLock::new(HashMap::new()),
@@ -69,6 +79,7 @@ impl SessionCache {
                 storage_key,
                 db,
                 google,
+                allowed_accounts,
             }),
         }
     }
@@ -97,6 +108,10 @@ impl SessionCache {
         let metadata = accounts::get(&self.state.db, google_sub)
             .await?
             .ok_or(SessionError::AccountNotFound)?;
+
+        if !crate::config::account_allowed_by_email(&self.state.allowed_accounts, &metadata.email) {
+            return Err(SessionError::AccountNotAllowed);
+        }
 
         match self.state.google.refresh(&refresh_token).await {
             Ok(grant) => {
@@ -128,6 +143,7 @@ impl SessionCache {
                     "Google returned invalid_grant; deleting account"
                 );
                 let _ = accounts::delete(&self.state.db, google_sub).await;
+                let _ = revocations::revoke(&self.state.db, google_sub, now_secs() as i64).await;
                 self.invalidate(google_sub).await;
                 Err(SessionError::ReconnectRequired)
             }
@@ -209,7 +225,7 @@ mod tests {
             vec!["openid".to_string()],
             reqwest::Client::new(),
         ));
-        SessionCache::new(db, google, key())
+        SessionCache::new(db, google, key(), vec![])
     }
 
     #[tokio::test]
@@ -264,5 +280,45 @@ mod tests {
         // which fails because there's no row in oauth_accounts.
         let err = cache.resolve("sub").await.unwrap_err();
         assert!(matches!(err, SessionError::AccountNotFound));
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_account_outside_allowlist() {
+        let db = Db::open_in_memory().await.unwrap();
+        accounts::upsert(
+            &db,
+            &key(),
+            accounts::UpsertAccount {
+                google_sub: "sub-1".into(),
+                email: "outsider@evil.com".into(),
+                refresh_token: "rt".into(),
+                scopes: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let google = Arc::new(GoogleOAuthClient::new(
+            "cid",
+            "csecret",
+            "http://localhost/cb",
+            vec!["openid".to_string()],
+            reqwest::Client::new(),
+        ));
+        let cache = SessionCache::new(
+            db,
+            google,
+            key(),
+            vec![crate::config::AllowedAccountEntry::Domain(
+                "example.com".into(),
+            )],
+        );
+        cache
+            .store_initial("sub-1", "outsider@evil.com", "tok", 3600, vec![])
+            .await;
+        // Fast-path cache hit still checks the allowlist on the slow path
+        // only, so invalidate first to force the DB lookup.
+        cache.invalidate("sub-1").await;
+        let err = cache.resolve("sub-1").await.unwrap_err();
+        assert!(matches!(err, SessionError::AccountNotAllowed));
     }
 }

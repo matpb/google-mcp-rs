@@ -37,7 +37,7 @@ fn schema_any_array(_: &mut SchemaGenerator) -> Schema {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GmailSearchThreadsParams {
     /// Gmail search query, e.g. `from:someone@example.com is:unread`.
-    /// See https://support.google.com/mail/answer/7190.
+    /// See <https://support.google.com/mail/answer/7190>.
     pub q: String,
     /// Page size (default 100, max 500).
     #[serde(default)]
@@ -93,13 +93,12 @@ pub struct GmailDownloadAttachmentParams {
     pub message_id: String,
     pub attachment_id: String,
     /// Preferred: write the decoded bytes to this path inside the server's
-    /// FILE_ROOT exchange directory and return `{ path, sizeBytes, filename,
-    /// mimeType }` instead of base64. Nothing enters the model's context.
+    /// `FILE_ROOT` exchange directory and return `{ path, sizeBytes, filename,
+    /// mimeType }` instead of base64. Exclusive with `to_drive_folder_id`.
     #[serde(default)]
     pub dest_path: Option<String>,
     /// Alternative: push the attachment straight into Google Drive. Set to a
-    /// Drive folder ID, or `"root"` for My Drive. Returns the new Drive file's
-    /// metadata. Bytes move Gmail -> Drive server-side.
+    /// Drive folder ID, or `"root"` for My Drive. Exclusive with `dest_path`.
     #[serde(default)]
     pub to_drive_folder_id: Option<String>,
     /// Optional filename override (used for `dest_path`'s Drive upload name /
@@ -391,7 +390,7 @@ pub struct SheetsCreateParams {
     /// Optional locale (e.g. `en_US`).
     #[serde(default)]
     pub locale: Option<String>,
-    /// Optional time zone (e.g. `America/Montreal`).
+    /// Optional time zone (e.g. `America/New_York`).
     #[serde(default)]
     pub time_zone: Option<String>,
 }
@@ -486,7 +485,7 @@ pub struct SheetsBatchUpdateParams {
     pub spreadsheet_id: String,
     /// Full body for spreadsheets:batchUpdate, e.g.
     /// `{"requests":[{"addSheet":{"properties":{"title":"X"}}}],"includeSpreadsheetInResponse":true}`.
-    /// See https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/request
+    /// See <https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/request>
     #[schemars(schema_with = "schema_any_object")]
     pub body: serde_json::Value,
 }
@@ -515,7 +514,7 @@ pub struct SheetsDeleteSheetParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DriveListFilesParams {
-    /// Drive query (https://developers.google.com/drive/api/guides/search-files),
+    /// Drive query (<https://developers.google.com/drive/api/guides/search-files>),
     /// e.g. `name contains 'invoice' and mimeType = 'application/pdf'`.
     #[serde(default)]
     pub q: Option<String>,
@@ -569,7 +568,7 @@ pub struct DriveCreateFileParams {
     #[serde(default)]
     pub data_base64: Option<String>,
     /// Preferred: read the content from this path inside the server's
-    /// FILE_ROOT exchange directory. No base64 through the model's context.
+    /// `FILE_ROOT` exchange directory. No base64 through the model's context.
     #[serde(default)]
     pub path: Option<String>,
     /// Optional Drive folder to nest the file under.
@@ -607,7 +606,7 @@ pub struct DriveUpdateContentParams {
     /// New content as base64. Exactly one of `data_base64` / `path` required.
     #[serde(default)]
     pub data_base64: Option<String>,
-    /// Preferred: read new content from this path inside FILE_ROOT.
+    /// Preferred: read new content from this path inside `FILE_ROOT`.
     #[serde(default)]
     pub path: Option<String>,
 }
@@ -615,7 +614,7 @@ pub struct DriveUpdateContentParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DriveDownloadFileParams {
     pub file_id: String,
-    /// Preferred: write the bytes to this path inside the server's FILE_ROOT
+    /// Preferred: write the bytes to this path inside the server's `FILE_ROOT`
     /// exchange directory and return `{ path, sizeBytes, contentType }`
     /// instead of base64. Nothing enters the model's context.
     #[serde(default)]
@@ -629,7 +628,7 @@ pub struct DriveExportFileParams {
     /// `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`,
     /// `text/csv`, `text/markdown`.
     pub export_mime_type: String,
-    /// Preferred: write the exported bytes to this path inside FILE_ROOT and
+    /// Preferred: write the exported bytes to this path inside `FILE_ROOT` and
     /// return `{ path, sizeBytes, contentType }` instead of base64.
     #[serde(default)]
     pub dest_path: Option<String>,
@@ -744,7 +743,7 @@ pub struct DocsBatchUpdateParams {
     pub document_id: String,
     /// Full body for documents:batchUpdate, e.g.
     /// `{"requests":[{"insertText":{"location":{"index":1},"text":"..."}}]}`.
-    /// See https://developers.google.com/docs/api/reference/rest/v1/documents/request
+    /// See <https://developers.google.com/docs/api/reference/rest/v1/documents/request>
     #[schemars(schema_with = "schema_any_object")]
     pub body: serde_json::Value,
 }
@@ -844,7 +843,7 @@ pub struct DocsMakeListParams {
     /// `BULLET_DISC_CIRCLE_SQUARE`, `BULLET_ARROW_DIAMOND_DISC`,
     /// `BULLET_CHECKBOX`, `NUMBERED_DECIMAL_ALPHA_ROMAN`,
     /// `NUMBERED_DECIMAL_NESTED`. See
-    /// https://developers.google.com/docs/api/reference/rest/v1/documents/request#bulletglyphpreset
+    /// <https://developers.google.com/docs/api/reference/rest/v1/documents/request#bulletglyphpreset>
     #[serde(default)]
     pub bullet_preset: Option<String>,
 }
@@ -912,7 +911,7 @@ pub struct CalendarCreateCalendarParams {
     pub description: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
-    /// IANA time zone (e.g. `America/Montreal`). Defaults to the user's.
+    /// IANA time zone (e.g. `America/New_York`). Defaults to the user's.
     #[serde(default)]
     pub time_zone: Option<String>,
 }
@@ -1048,7 +1047,7 @@ pub struct CalendarEventFields {
     /// Free-form merge: any extra Event resource fields (e.g. `attachments`,
     /// `extendedProperties`, `guestsCanModify`). Merged on top of the
     /// structured fields above. See
-    /// https://developers.google.com/calendar/api/v3/reference/events.
+    /// <https://developers.google.com/calendar/api/v3/reference/events>.
     #[serde(default)]
     #[schemars(schema_with = "schema_optional_any_object")]
     pub extra_event_fields: Option<serde_json::Value>,

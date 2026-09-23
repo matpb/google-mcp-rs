@@ -4,7 +4,7 @@ A multi-tenant **Model Context Protocol** server for **Google Workspace**, writt
 
 It also runs in **single-tenant stdio mode** as a prebuilt binary that any local MCP client (Claude Code, Claude Desktop, Codex, Cursor) launches as a child process — no TLS certificate, no tunnel, no inbound network exposure.
 
-> **Status:** v0.11.0 — Gmail (28) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **113 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 114th tool, `google_authenticate`, handles in-chat sign-in.
+> **Status:** v1.0.0 — Gmail (28) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **113 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 114th tool, `google_authenticate`, handles in-chat sign-in.
 
 ## Why
 
@@ -12,9 +12,29 @@ The first-party Google Workspace MCP server is missing fundamentals (you cannot 
 
 - **Full Gmail / Sheets / Drive / Docs / Calendar / Tasks / Contacts / Search Console surface** — 113 tools covering email (search/threads/drafts/send/labels/filters/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence), Google Tasks (task lists + tasks CRUD, subtasks, reordering, completion, cross-list moves), Google Contacts (contact CRUD, prefix search, contact groups/labels and their membership), and Google Search Console (properties, sitemaps, search analytics, URL inspection).
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
-- **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256.
+- **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256, a consent screen, and per-account revocation.
 - **Two transports, one binary** — **streamable HTTP** (multi-tenant: one running instance serves many MCP clients and many Google accounts at once), or **stdio** (single-tenant: your MCP client launches it as a local child process, no TLS and nothing on the network). See [Quick start — prebuilt binary (stdio)](#quick-start--prebuilt-binary-stdio).
 - **One binary, distroless image** — small surface, no runtime dependencies.
+
+## Contents
+
+- [Architecture overview](#architecture-overview)
+- [Security model](#security-model)
+- [Deployment posture](#deployment-posture)
+- [Quick start — prebuilt binary (stdio)](#quick-start--prebuilt-binary-stdio)
+- [Quick start — HTTP server (local development)](#quick-start--http-server-local-development)
+- [Configuration reference](#configuration-reference)
+- [Scoping the surface](#scoping-the-surface)
+- [File handling](#file-handling-attachments-uploads-downloads)
+- [Operations](#operations)
+- [Tools](#tools)
+- [Error contract](#error-contract)
+- [Caveats](#caveats)
+- [Roadmap](#roadmap)
+- [Releasing](#releasing)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
 
 ## Architecture overview
 
@@ -33,7 +53,10 @@ MCP client (Claude.ai)
    │ 3. /oauth/register  ◀── mcp_client_id, mcp_client_secret
    │ 4. /authorize?response_type=code&code_challenge=...&redirect_uri=...
    ▼
-google-mcp ──── redirect ───▶ accounts.google.com (consent screen)
+google-mcp ── server-rendered consent screen ──▶ you approve/deny
+   │                                                  │
+   ▼ (on approve)                                     │
+google-mcp ──── redirect ───▶ accounts.google.com (Google's own consent screen)
                                                 │
    ◀────── /oauth/google/callback?code=… ◀─────┘
    │  (server stores Google refresh token, encrypted)
@@ -45,20 +68,31 @@ MCP client → /mcp Authorization: Bearer <MCP JWT>
               tools call Gmail with the user's stored refresh token
 ```
 
-State is threaded MCP-client → Google → callback via single-use opaque tokens stored in SQLite (5-minute TTL). MCP JWTs are HS256 signed, bound to the user's Google `sub`, audience-scoped to `${BASE_URL}/mcp`.
+State is threaded MCP-client → our consent screen → Google → callback via single-use opaque tokens stored in SQLite (5-minute TTL for authorization codes, 10-minute TTL for the in-flight `/authorize` state, both bound to a per-flow browser cookie). MCP JWTs are HS256 signed, bound to the user's Google `sub`, audience-scoped to `${BASE_URL}/mcp`, and fully verified (signature, expiry, audience) on every `/mcp` request.
+
+## Security model
+
+- **Consent screen.** `/authorize` renders our own approval page before redirecting to Google: it shows the connecting client's self-reported name (explicitly labeled as unverified), where access will be sent (parsed from the real `redirect_uri`, never the raw string), and the Google scopes about to be requested. Approval is bound to the browser with a per-flow `HttpOnly` cookie, so an attacker who tricks a victim into visiting a crafted `/authorize` link cannot get it silently approved — the approving browser must be the one that started the flow. A request to `/authorize` on any host other than `BASE_URL` is redirected to `BASE_URL` first, so the binding cookie is always set on the right origin. Denying returns `error=access_denied` to the MCP client. The state row (and its cookie) expire after 10 minutes; the authorization code minted after approval expires after 5 minutes.
+- **Token verification at the gate.** Every `/mcp` request's bearer token is fully verified — signature, expiry, and audience — before it reaches a tool handler. An invalid or expired token gets `401` with `WWW-Authenticate: Bearer error="invalid_token"`, which well-behaved MCP clients treat as a signal to re-authenticate automatically. A token's `aud` claim must name this server's own `/mcp` URL (every token this server has ever issued does); `/oauth/token` separately validates an RFC 8707 `resource` parameter against the same allowlist and rejects a mismatch with `invalid_target`.
+- **Host allowlist (anti DNS-rebinding).** Every route except `/health` validates the `Host` header (and any `X-Forwarded-Host` element) against loopback names, `BASE_URL`'s own host, and the operator-supplied `ALLOWED_HOSTS` list. A request with an unrecognized Host gets `403`.
+- **Revocation.** `google-mcp accounts revoke <email-or-sub>` writes a tombstone (`not_before` timestamp) that invalidates *every* JWT issued for that account before the moment of revocation — including ones that haven't expired yet — then best-effort revokes the refresh token with Google and deletes the stored account row. This is the only way to cut a session short before its 30-day JWT lifetime; rotating `JWT_SECRET` (which logs out everyone) is no longer the only lever.
+- **Account allowlist.** Optional `ALLOWED_GOOGLE_ACCOUNTS` restricts which Google identities may connect at all, by exact email or `@domain` (matched against Google's `hd` claim, which requires a verified email on that account). Enforced at sign-in and re-checked on every tool call, so removing someone from the list also cuts off tokens issued before the change.
+- **Dynamic client registration hardening.** Redirect URIs are parsed (not string-matched): no embedded userinfo, no fragment, `https` or loopback `http` only (plus Cursor's private-use scheme). Registrations are capped at 10,000 rows and size-limited; unused client registrations are pruned automatically after 24 hours of inactivity. Client secrets are hashed with SHA-256 (legacy Argon2id hashes from earlier registrations still verify).
+- **File-exchange jail.** When `FILE_ROOT` is set, every path is canonicalized and checked to be inside it before any read or write — absolute paths must live under it, relative paths resolve against it, `..` and symlink escapes are rejected, and writes are atomic (temp file + rename, never following a symlink at the destination or creating directories outside the root).
+- **Response and payload limits.** Google API responses are capped at 64 MiB, file downloads at 256 MiB, Drive uploads at 256 MiB, and outgoing email (headers + body + attachments) at 24 MiB — all enforced server-side before the bytes reach the model's context.
+- **Secrets at rest.** Google refresh tokens are encrypted with AES-256-GCM, AAD-bound to the account's Google `sub` so ciphertexts can't be swapped between rows. In stdio/auth mode, `JWT_SECRET` and `STORAGE_ENCRYPTION_KEY` are auto-generated and written to `<DATABASE_URL>.keys` at file mode `0600` via atomic create-then-rename (never briefly world-readable, never left half-written by an interrupted run).
 
 ## Deployment posture
 
 This server is designed to be **self-hosted on your own machine** — typically one instance per workstation, listening on `127.0.0.1`, serving multiple MCP clients and multiple Google accounts at once. The quick-start below walks you through exactly that.
 
-Public-internet deployment is *possible* — the OAuth flow, crypto (AES-256-GCM with AAD-bound `sub`, Argon2id-hashed client secrets, S256 PKCE, single-use codes with 5-minute TTL), and per-tenant isolation are sound — but going public adds attack surface this codebase does not yet cover:
+Public-internet deployment is *possible* — the OAuth flow, the consent screen with browser-binding, the host allowlist, full bearer-token verification, per-account revocation, an optional account allowlist, AES-256-GCM refresh-token encryption, S256 PKCE, and single-use short-TTL codes are all in place — but a couple of gaps remain worth knowing about before you expose this beyond your own network:
 
-- **No rate limiting** on `/oauth/register`, `/oauth/token`, `/authorize`, or `/mcp`. Brute-force and DoS are unmitigated.
-- **No per-user JWT revocation.** Tokens have a 30-day lifetime; the only cut-off is rotating `JWT_SECRET`, which logs everyone out.
-- **Audience binding skipped on `Host: localhost`** for local-dev convenience. Public instances must enforce that the token's `aud` claim matches the deployed `BASE_URL` regardless of inbound `Host`.
-- **No network egress policy** on the container — a compromised process could reach anywhere on the internet.
+- **No built-in rate limiting** on `/oauth/register`, `/oauth/token`, `/authorize`, or `/mcp`. Brute-force and DoS are unmitigated at the application layer — put a reverse proxy (nginx, Caddy, Cloudflare, etc.) with request-rate limits in front of a public instance.
+- **No network egress policy** on the container — a compromised process could reach anywhere on the internet. Pair the provided `docker-compose.yml` hardening (read-only root, all capabilities dropped, `no-new-privileges`) with an egress firewall rule if that matters for your threat model.
+- **JWTs still live 30 days.** That's now recoverable — `accounts revoke` invalidates them immediately — but there's no short-lived-access-token + refresh-token split, so a leaked JWT is valid until either its expiry or an explicit revoke.
 
-If those gaps don't fit your threat model, fork it. The architecture is set up to make those additions straightforward, and PRs are welcome.
+If those gaps don't fit your threat model, fork it. The architecture is set up to make those additions straightforward, and PRs are welcome. See [SECURITY.md](SECURITY.md) for the full threat model and how to report a vulnerability.
 
 ## Quick start — prebuilt binary (stdio)
 
@@ -104,13 +138,13 @@ This path is for a personal install on your own machine; see [Quick start — HT
    Codex / ChatGPT desktop (`~/.codex/config.toml`):
    ```toml
    [mcp_servers.google_workspace]
-   command = "/home/you/.local/bin/google-mcp"
+   command = "<HOME>/.local/bin/google-mcp"
    args = ["stdio"]
    [mcp_servers.google_workspace.env]
    GOOGLE_CLIENT_ID = "..."
    GOOGLE_CLIENT_SECRET = "..."
    BASE_URL = "http://localhost:8433"
-   DATABASE_URL = "/home/you/.google-mcp.db"
+   DATABASE_URL = "<HOME>/.google-mcp.db"
    ```
 
 4. **Sign in once** — run `google-mcp auth` in a terminal with the same env vars, or ask the assistant to call the **`google_authenticate`** tool. A browser opens, you approve, and that is it. Port 8433 must be free during sign-in only.
@@ -164,33 +198,42 @@ The server listens on `http://0.0.0.0:8433` by default. `/health` returns `ok`. 
 
 ### 4. Connect Claude Code
 
-Add the server once per Google account you want to use. Each entry triggers its own OAuth dance, so you pick the matching Google account in the browser tab when prompted.
+Add the server once per Google account you want to use. Each entry triggers its own OAuth dance: our consent screen first, then Google's, and you pick the matching Google account in the browser tab when prompted.
 
 ```bash
 claude mcp add --transport http --scope user google-personal http://localhost:8433/mcp
 claude mcp add --transport http --scope user google-work     http://localhost:8433/mcp
 ```
 
-Then in any Claude Code session run `/mcp` and authenticate each entry. The JWTs land in Claude Code's credential vault; the server is multi-tenant and keys on Google `sub`, so one running instance handles both accounts. JWT lifetime is 30 days; access tokens refresh transparently every hour.
+Then in any Claude Code session run `/mcp` and authenticate each entry. The JWTs land in Claude Code's credential vault; the server is multi-tenant and keys on Google `sub`, so one running instance handles both accounts. JWT lifetime is 30 days (revocable early with `google-mcp accounts revoke`, see [Operations](#operations)); access tokens refresh transparently every hour.
 
 For **Claude.ai / ChatGPT custom connectors / Cursor**, add a custom connector pointing at `http://localhost:8433/mcp` — these clients have to support local-loopback URLs and the MCP 2025-11-25 OAuth flow, which not all of them do yet.
 
-## Configuration
+## Configuration reference
+
+Every variable `ServerConfig::from_env()` reads, from `src/config.rs`:
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `GOOGLE_CLIENT_ID` | yes | — | OAuth client ID from GCP Console |
 | `GOOGLE_CLIENT_SECRET` | yes | — | OAuth client secret from GCP Console |
-| `BASE_URL` | yes | — | Public URL of this server, used to compute redirect URIs and OAuth metadata |
-| `JWT_SECRET` | yes | — | HS256 secret for signing MCP JWTs (32+ bytes) |
-| `STORAGE_ENCRYPTION_KEY` | yes | — | 32 bytes, base64url-encoded — encrypts refresh tokens at rest |
-| `DATABASE_URL` | no | `./google-mcp.db` | SQLite file path |
-| `MCP_HOST` | no | `0.0.0.0` | Bind address |
+| `BASE_URL` | yes | — | Public URL of this server (`http://` or `https://`, trailing slash stripped). Used to compute the Google redirect URI, the default OAuth issuer, and the host allowlist |
+| `JWT_SECRET` | yes* | — | HS256 secret for signing MCP JWTs, at least 32 bytes. *In `stdio`/`auth` mode, auto-generated and persisted at `<DATABASE_URL>.keys` (mode `0600`) if unset — required in `http` mode |
+| `STORAGE_ENCRYPTION_KEY` | yes* | — | 32 bytes, base64url-encoded — encrypts refresh tokens at rest. *Same auto-generation as `JWT_SECRET` in `stdio`/`auth` mode |
+| `MCP_HOST` | no | `0.0.0.0` | Bind address, parsed as an IP |
 | `MCP_PORT` | no | `8433` | Listen port |
-| `CORS_ALLOW_LOCALHOST` | no | `false` | Allow `http://localhost:*` in CORS (dev only) |
-| `ENABLED_DOMAINS` | no | all eight | Comma-separated subset of `gmail,sheets,drive,docs,calendar,tasks,people,searchconsole` (`contacts` is accepted as an alias for `people`; `search_console` and `search-console` and `webmasters` are accepted as aliases for `searchconsole`). Filters both the MCP tool surface and the OAuth scopes requested from Google. Unset = all eight. See [Scoping the surface](#scoping-the-surface) below. |
-| `FILE_ROOT` | no | — (disabled) | Absolute path to the file-exchange directory, bind-mounted into the container at the same path. Enables attaching/uploading by `path` and saving downloads by `dest_path` instead of base64. Unset = base64-only. See [File handling](#file-handling-attachments-uploads-downloads) below. |
-| `FILE_MAINTENANCE_TOOLS` | no | `off` | Whether the directory-maintenance tools are exposed: `off` (neither), `info` (read-only `files_info`), or `full` (`files_info` + the deleting `files_cleanup`). Off by default, so no deletion/listing tool exists unless you opt in. Only meaningful when `FILE_ROOT` is set. |
+| `DATABASE_URL` | no | `./google-mcp.db` | SQLite file path (or `:memory:` in tests) |
+| `CORS_ALLOW_LOCALHOST` | no | `false` | Allow any loopback origin (`localhost`/`127.0.0.1`/`::1`, any scheme/port) in CORS. Dev only — production always allows only `https://claude.ai` and `https://claude.com` regardless of this setting |
+| `ALLOWED_HOSTS` | no | none | Comma-separated extra `Host`/`X-Forwarded-Host` entries allowed beyond loopback and `BASE_URL`'s own host — e.g. a tunnel or reverse-proxy hostname. Also extends the RFC 8707 `aud`/`resource` allowlist |
+| `ENABLED_DOMAINS` | no | all eight | Comma-separated subset of `gmail,sheets,drive,docs,calendar,tasks,people,searchconsole` (`contacts` aliases `people`; `search_console`/`search-console`/`webmasters` alias `searchconsole`). Filters both the MCP tool surface and the OAuth scopes requested from Google. See [Scoping the surface](#scoping-the-surface) |
+| `ALLOWED_GOOGLE_ACCOUNTS` | no | unrestricted | Comma-separated exact emails and/or `@domain` entries. A `@domain` entry matches Google's `hd` claim (Workspace domain), not an email suffix. Empty/unset = any Google account may connect |
+| `FILE_ROOT` | no | — (disabled) | Absolute path to the file-exchange directory, bind-mounted into the container at the same path. Enables attaching/uploading by `path` and saving downloads by `dest_path` instead of base64. Unset = base64-only. See [File handling](#file-handling-attachments-uploads-downloads) |
+| `FILE_MAINTENANCE_TOOLS` | no | `off` | Whether the directory-maintenance tools are exposed: `off` (neither), `info` (read-only `files_info`), or `full` (`files_info` + the deleting `files_cleanup`). Off by default, so no deletion/listing tool exists unless you opt in. Only meaningful when `FILE_ROOT` is set |
+
+Not read by `ServerConfig`, but honored elsewhere:
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
 | `RUST_LOG` | no | `google_mcp=info,rmcp=warn,reqwest=warn` | Tracing filter — keep `reqwest` ≤ `warn` to avoid logging URLs with PII |
 
 ## Scoping the surface
@@ -232,11 +275,11 @@ It also does **server-side transfers** so bytes move Google↔Google without a r
 | Task | Do this |
 | --- | --- |
 | Attach a Drive file to an email | `gmail_send attachments=[{ "drive_file_id": "1AbC…" }]` |
-| Save an email attachment to Drive | `gmail_download_attachment to_drive_folder_id="root"` |
+| Save an email attachment to Drive | `gmail_download_attachment to_drive_folder_id="root"` (mutually exclusive with `dest_path`) |
 
-**Safety & semantics.** Every path is confined to `FILE_ROOT` — absolute paths must live under it, relative paths resolve against it, and `..`/symlink escapes are rejected. `mime_type` is inferred from the filename when omitted. When `FILE_ROOT` is set, oversized downloads (>8 MB) refuse to return inline base64 and point you at `dest_path`. Leaving `FILE_ROOT` unset disables path-based exchange entirely and every tool falls back to base64 — so remote deployments still work, they just pay the base64 tax.
+**Safety & semantics.** Every path is confined to `FILE_ROOT` — absolute paths must live under it, relative paths resolve against it, and `..`/symlink escapes are rejected; writes are atomic and never follow a symlink at the destination. `mime_type` is inferred from the filename when omitted. When `FILE_ROOT` is set, oversized downloads (>8 MB) refuse to return inline base64 and point you at `dest_path`; downloads are capped at 256 MiB and Drive uploads at 256 MiB regardless. Leaving `FILE_ROOT` unset disables path-based exchange entirely and every tool falls back to base64 — so remote deployments still work, they just pay the base64 tax.
 
-**Permissions.** The container runs as uid 65532, so the exchange directory must be writable by that uid. For a fresh dedicated directory, `chmod 0777 ~/.google-mcp/exchange` on a single-user workstation is simplest (or pre-create it owned by 65532). Files the server writes will be owned by 65532 on the host. If you point `FILE_ROOT` at a directory you already own (e.g. your Downloads folder, so you can attach files without copying them in), grant the container write access without opening it to the world using an ACL — `setfacl -m u:65532:rwx ~/Downloads` — or run the container as your own uid via a `docker-compose.override.yml` (`user: "1000:1000"`, after chowning the data volume). **Caveat:** whatever directory you choose becomes the scope of `files_cleanup`, so pointing `FILE_ROOT` at a busy folder like Downloads means an unfiltered `files_cleanup dry_run=false` would delete everything in it (except `keep/`) — always filter and dry-run first.
+**Permissions.** The container runs as uid 65532, so the exchange directory must be writable by that uid — see [Operations](#operations) for the recommended `chown`/`setfacl` approach. Files the server writes will be owned by 65532 on the host. **Caveat:** whatever directory you choose becomes the scope of `files_cleanup`, so pointing `FILE_ROOT` at a busy folder like Downloads means an unfiltered `files_cleanup dry_run=false` would delete everything in it (except `keep/`) — always filter and dry-run first.
 
 **Discoverability.** When `FILE_ROOT` is set, the MCP server's `instructions` (returned on connect) include a FILE HANDLING section that states the live exchange path and these rules, so any calling agent learns the protocol without being told.
 
@@ -248,6 +291,44 @@ It also does **server-side transfers** so bytes move Google↔Google without a r
 | `files_cleanup` | `FILE_MAINTENANCE_TOOLS=full` | Delete files by age (`older_than_hours`) and/or name (`name_contains`). **Defaults to `dry_run: true`** — reports what would go and removes nothing until you pass `dry_run: false`. |
 
 Anything under a `keep/` subdirectory of `FILE_ROOT` is invisible to `files_cleanup` and never deleted. If you point `FILE_ROOT` at a directory you manage yourself (e.g. your Downloads folder), leave `FILE_MAINTENANCE_TOOLS=off` (the default) so the server can never delete anything there.
+
+## Operations
+
+### Listing and revoking accounts
+
+```bash
+google-mcp accounts list
+google-mcp accounts revoke <email-or-sub>
+
+# in Docker:
+docker exec google-mcp google-mcp accounts list
+docker exec google-mcp google-mcp accounts revoke someone@example.com
+```
+
+`accounts list` prints every connected Google account with its `sub`, email, and created/updated/last-refresh timestamps. `accounts revoke` writes a revocation tombstone (instantly invalidating every JWT issued for that account, even ones that haven't expired), best-effort revokes the refresh token with Google, and deletes the stored account row. Run it as soon as you suspect a token leaked — you don't have to wait for the 30-day JWT lifetime to run out or rotate `JWT_SECRET` for everyone.
+
+### Backups
+
+The SQLite database and its `.keys` file (stdio/auth mode) are created at file mode `0600`. Back them up like any other secret store — the database holds every connected account's encrypted refresh token.
+
+### Upgrading from 0.x
+
+Migration `002_consent_and_revocation.sql` runs automatically on first startup against an older database — no manual step. Before applying it, the server writes a full backup to `<DATABASE_URL>.pre-002.bak` (also mode `0600`). If you need to roll back to a 0.x binary, stop the server, restore that backup over the live database file, and start the old binary — a newer schema is refused by older binaries, which is exactly why the backup exists.
+
+### File-exchange directory ownership
+
+The container runs as uid 65532. For an operator-owned directory (not one you already use for other things), prefer one of these over `chmod 0777`:
+
+```bash
+# Pre-create and hand ownership to the container's uid:
+mkdir -p ~/.google-mcp/exchange && sudo chown 65532:65532 ~/.google-mcp/exchange
+
+# Or, to keep your own ownership and grant the container write access via ACL
+# (useful when FILE_ROOT points at a directory you already own, e.g. Downloads):
+setfacl -m u:65532:rwx ~/Downloads
+```
+
+`chmod 0777` still works and is documented in [`.env.example`](.env.example) as the fastest single-user-workstation option, but it makes the directory world-writable — `chown`/`setfacl` scope write access to exactly the container's uid instead.
 
 ## Tools
 
@@ -337,7 +418,7 @@ Anything under a `keep/` subdirectory of `FILE_ROOT` is invisible to `files_clea
 | `drive_list_files` | Search/list files with Drive query syntax |
 | `drive_get_file` | Fetch file metadata |
 | `drive_create_folder` | Create a folder (optionally nested) |
-| `drive_create_file` | Upload a file (multipart, ≤ ~5 MB content) |
+| `drive_create_file` | Upload a file (multipart, ≤ 256 MB content) |
 | `drive_update_metadata` | Rename, re-describe, move (add/remove parents), star |
 | `drive_update_content` | Replace a file's binary content |
 | `drive_download_file` | Download bytes (returns base64) |
@@ -422,7 +503,7 @@ Anything under a `keep/` subdirectory of `FILE_ROOT` is invisible to `files_clea
 | `searchconsole_get_sitemap` | Get one sitemap's status |
 | `searchconsole_submit_sitemap` | Submit a sitemap URL, or resubmit one to ask Google to fetch it again |
 | `searchconsole_delete_sitemap` | **Irreversibly** remove a sitemap from the property (resubmit to add it back) |
-| `searchconsole_query_analytics` | Search performance: clicks, impressions, CTR, position over a date range, grouped by `country`/`device`/`page`/`query`/`searchAppearance`/`date`/`hour`, with AND filters, `search_type`, paging via `row_limit`/`start_row` |
+| `searchconsole_query_analytics` | Search performance: clicks, impressions, CTR, position over a date range, grouped by `country`/`device`/`page`/`query`/`searchAppearance`/`date`/`hour`, with AND filters, `search_type`, paging via `row_limit`/`start_row`. The `hour` dimension requires `data_state=hourly_all` |
 | `searchconsole_inspect_url` | URL Inspection: index verdict, coverage, last crawl, canonical, rich results for one URL |
 
 > **Property spelling matters.** A Domain property is `sc-domain:example.com`; a URL-prefix property is `https://example.com/` with the trailing slash. Copy `siteUrl` from `searchconsole_list_sites` verbatim. Search analytics dates are `YYYY-MM-DD` in Pacific time and the last two or three days are excluded until `data_state=all` is passed.
@@ -453,7 +534,7 @@ Every error returned by the server includes a structured `data` payload alongsid
 | `invalid_input` | no | Tool args malformed (missing field, wrong type, mutually exclusive options, no recipients, etc.) | Read `hint`, fix args, retry |
 | `not_found` | no | Resource ID does not exist or is not visible to this account | Read `resource_kind` + `hint`, call the right discovery tool, retry with a new ID |
 | `auth_required` | no | User must re-authorize (refresh token revoked, account not registered with this server) | Surface `reconnect_url` to the user; this is unrecoverable from the agent's side |
-| `auth_invalid` | no | JWT itself is bad (expired, wrong signature, audience mismatch) | Re-run the OAuth flow at `/authorize` |
+| `auth_invalid` | no | JWT itself is bad (expired, wrong signature, audience mismatch, revoked) | Re-run the OAuth flow at `/authorize` |
 | `rate_limited` | **yes** | Google rate limit hit | Back off (exponential: 250ms → 1s → 4s) and retry |
 | `permission_denied` | no | Account lacks permission for this resource | Don't retry; surface to the user |
 | `transient` | **yes** | Network blip / Google 5xx | Retry once or twice with a 1–5s delay |
@@ -470,26 +551,30 @@ Every error returned by the server includes a structured `data` payload alongsid
 ## Caveats
 
 - **Unverified app cap.** Until your OAuth client is verified by Google, only **test users** (added in the GCP Console) can authorize, and the app is hard-capped at 100 users for its lifetime. `gmail.modify`, `drive`, `spreadsheets`, `documents`, and `calendar` are all **restricted/sensitive scopes** — verification for the full set requires a [CASA assessment](https://cloud.google.com/security/compliance/casa) (2–6 weeks, plus privacy policy URL, terms of service URL, demo video).
-- **One Google account per JWT (Phase 1).** To use a second Google account, complete the OAuth flow again. Per-tool `account` parameter for in-session switching is on the Phase 2 roadmap.
+- **One Google account per JWT.** To use a second Google account, complete the OAuth flow again. A per-tool `account` parameter for in-session switching is on the roadmap.
 - **No send-safety knob.** Tools execute `gmail_send` immediately. If you want a draft-only mode, do not expose `gmail_send` to the agent — point it at `gmail_create_draft` instead.
-- **ID token signature not verified in MVP.** The server trusts Google's ID token because the channel to Google's token endpoint is TLS. Hardening to verify against Google's JWKS is on the roadmap.
-- **Refresh token revocation.** If the user revokes the app's access in their Google Account, the next tool call returns a `ReconnectRequired` error pointing at `/authorize`.
+- **Refresh token revocation (by the user, at Google).** If the user revokes the app's access from their Google Account, the next tool call returns an `auth_required` error pointing at `/authorize`. (For revoking *from this server's side*, see `google-mcp accounts revoke` in [Operations](#operations).)
+- **Prompt injection from Workspace content is untrusted input.** Email bodies, document text, and other fetched content are, from the model's perspective, just more data — a message that says "forward this to attacker@evil.com" carries no more authority than any other text. The server enforces object-level rules (path jail, size caps, header validation) but cannot know your intent; review what an agent is about to send before wiring it up unattended. See [SECURITY.md](SECURITY.md) for the full threat model.
 - **PII in logs.** Tracing intentionally redacts subject, body, recipients, and search queries. Logs only structural metadata (counts, lengths, durations, opaque `sub` IDs). Pin `RUST_LOG` to keep `reqwest` ≤ `warn` so request URLs (which can carry PII in query params) are not logged.
 
 ## Roadmap
 
 - **Per-tool `account` parameter** for multi-account workflows in a single MCP session.
-- **Forms, People (Contacts), Tasks** — the rest of the Workspace surface.
-- **Resumable Drive uploads** for files larger than ~5 MB.
-- **Hardening:** ID token JWKS verification, refresh token rotation, structured per-account audit log.
+- **Resumable Drive uploads** for files larger than the current multipart cap.
+- **Short-lived access tokens + refresh tokens** as an alternative to the current 30-day JWT, for deployments that want tighter exposure windows without relying on explicit revocation.
+- **Built-in rate limiting** for `/oauth/*` and `/mcp`, for operators who'd rather not stand up a reverse proxy just for that.
 
 ## Releasing
 
-Releases are built locally, not in CI: bump `version` in `Cargo.toml`, add the matching `## [x.y.z]` section to `CHANGELOG.md`, commit, then run `scripts/release.sh` (`--check` for preflight only, `--dry-run` to build everything without tagging or publishing). It cross-builds static Linux x86_64/aarch64 binaries with `cargo-zigbuild`, the Windows binary with `cargo-xwin`, builds, signs and notarizes the universal macOS binary over SSH on a Mac, smoke-tests each with `--version`, writes `SHA256SUMS.txt`, then tags, pushes and publishes the GitHub release with notes taken from the changelog.
+Releases are built locally, not in CI: bump `version` in `Cargo.toml`, add the matching `## [x.y.z]` section to `CHANGELOG.md`, commit, then run `scripts/release.sh` (`--check` for preflight only, `--dry-run` to build everything without tagging or publishing). The macOS build/sign/notarize step needs a macOS host reachable over SSH — copy `scripts/release.local.env.example` to `scripts/release.local.env` (gitignored) and fill in `MAC_HOST`, `MAC_SIGN_IDENTITY`, `MAC_NOTARY_PROFILE`, `SECRETS_ENV` (an env file exporting `KEYCHAIN_PASSWORD`), and optionally `MAC_REPO_DIR`; `--skip-mac` ships three binaries instead of four when that host isn't available. The script cross-builds static Linux x86_64/aarch64 binaries with `cargo-zigbuild`, the Windows binary with `cargo-xwin`, builds/signs/notarizes the universal macOS binary, smoke-tests each with `--version`, writes `SHA256SUMS.txt`, then tags, pushes and publishes the GitHub release with notes taken from the `## [x.y.z]` section of `CHANGELOG.md` (so that heading's format must match exactly).
 
 ## Contributing
 
-Pull requests welcome. CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test`. Please keep secrets out of fixtures and tests.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build/test/lint commands, code conventions, and how to add a new tool.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) to report a vulnerability, and for the full threat model and list of built-in protections.
 
 ## License
 

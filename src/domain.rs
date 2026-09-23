@@ -41,6 +41,20 @@ impl Domain {
         }
     }
 
+    /// Human-readable name shown on the consent screen.
+    pub fn human_name(&self) -> &'static str {
+        match self {
+            Domain::Gmail => "Gmail",
+            Domain::Sheets => "Google Sheets",
+            Domain::Drive => "Google Drive",
+            Domain::Docs => "Google Docs",
+            Domain::Calendar => "Google Calendar",
+            Domain::Tasks => "Google Tasks",
+            Domain::People => "Contacts",
+            Domain::SearchConsole => "Search Console",
+        }
+    }
+
     /// The Google OAuth scopes this domain requires.
     pub fn google_scopes(&self) -> &'static [&'static str] {
         match self {
@@ -118,7 +132,11 @@ pub fn parse_enabled(raw: Option<&str>) -> Result<Vec<Domain>, String> {
 pub fn google_scopes(domains: &[Domain]) -> Vec<String> {
     let mut s: Vec<String> = vec!["openid".to_string(), "email".to_string()];
     for d in domains {
-        s.extend(d.google_scopes().iter().map(|x| x.to_string()));
+        s.extend(
+            d.google_scopes()
+                .iter()
+                .map(std::string::ToString::to_string),
+        );
     }
     s
 }

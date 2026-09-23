@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# Local release script: cross-builds Linux/Windows here, macOS over SSH to
-# mat-air, signs+notarizes, writes checksums, tags and publishes on GitHub.
+# Local release script: cross-builds Linux/Windows here, macOS over SSH.
+# macOS config: env vars, optionally from scripts/release.local.env (see --help).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 die() { echo "error: $*" >&2; exit 1; }
+
+LOCAL_ENV="$ROOT/scripts/release.local.env"
+if [[ -f "$LOCAL_ENV" ]]; then
+  # shellcheck disable=SC1090
+  source "$LOCAL_ENV"
+fi
+
+MAC_REPO_DIR="${MAC_REPO_DIR:-google-mcp-rs}"
 
 CHECK_ONLY=0
 DRY_RUN=0
@@ -22,6 +30,19 @@ Usage: scripts/release.sh [--check] [--dry-run] [--skip-mac] [--help]
   --skip-mac  Skip the macOS build (emergency use only); the release
               then ships three binaries instead of four.
   --help      Show this help and exit.
+
+The macOS build/sign/notarize step needs a macOS host reachable over SSH.
+Configure it with environment variables, or put them in
+scripts/release.local.env (gitignored; copy from release.local.env.example):
+
+  MAC_HOST             SSH host of the macOS build machine
+  MAC_SIGN_IDENTITY     codesign identity string
+  MAC_NOTARY_PROFILE    xcrun notarytool --keychain-profile name
+  SECRETS_ENV           env file that exports KEYCHAIN_PASSWORD
+  MAC_REPO_DIR          remote checkout path, relative to the remote home
+                       (default: google-mcp-rs)
+
+All are required unless --skip-mac is passed.
 EOF
 }
 
@@ -79,9 +100,15 @@ done
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated"
 
 if [[ "$SKIP_MAC" -eq 0 ]]; then
-  ssh -o BatchMode=yes -o ConnectTimeout=10 mat-air true \
-    || die "cannot SSH to mat-air"
-  SECRETS_ENV="${SECRETS_ENV:-/home/mat/Documents/wspr-rs/.env}"
+  missing=()
+  [[ -n "${MAC_HOST:-}" ]] || missing+=(MAC_HOST)
+  [[ -n "${MAC_SIGN_IDENTITY:-}" ]] || missing+=(MAC_SIGN_IDENTITY)
+  [[ -n "${MAC_NOTARY_PROFILE:-}" ]] || missing+=(MAC_NOTARY_PROFILE)
+  [[ -n "${SECRETS_ENV:-}" ]] || missing+=(SECRETS_ENV)
+  [[ ${#missing[@]} -eq 0 ]] || die "missing required variable(s) for the macOS step: ${missing[*]} (set them or use --skip-mac; see --help)"
+
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$MAC_HOST" true \
+    || die "cannot SSH to $MAC_HOST"
   # shellcheck disable=SC1090
   source "$SECRETS_ENV"
   [[ -n "${KEYCHAIN_PASSWORD:-}" ]] || die "KEYCHAIN_PASSWORD is empty after sourcing $SECRETS_ENV"
@@ -139,41 +166,46 @@ fi
 # D. macOS build, sign, notarize
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_MAC" -eq 0 ]]; then
-  echo "==> macOS build (mat-air)"
-  ssh mat-air 'nohup caffeinate -dimsu -t 3600 >/dev/null 2>&1 & disown' || true
-  trap 'ssh mat-air "pkill -f \"caffeinate -dimsu -t 3600\"" >/dev/null 2>&1 || true' EXIT
+  echo "==> macOS build ($MAC_HOST)"
+  ssh "$MAC_HOST" 'nohup caffeinate -dimsu -t 3600 >/dev/null 2>&1 & disown' || true
+  trap 'ssh "$MAC_HOST" "pkill -f \"caffeinate -dimsu -t 3600\"" >/dev/null 2>&1 || true' EXIT
 
   rsync -az --delete --exclude target/ --exclude dist/ --exclude .git/ \
-    --exclude .env --exclude '*.db*' "$ROOT/" mat-air:~/Documents/google-mcp-rs/
+    --exclude .env --exclude '*.db*' "$ROOT/" "$MAC_HOST:$MAC_REPO_DIR/"
 
   notarize_out="$(mktemp)"
-  { printf 'export KEYCHAIN_PASSWORD=%q\n' "$KEYCHAIN_PASSWORD"; cat <<'REMOTE'
+  { printf 'export KEYCHAIN_PASSWORD=%q\n' "$KEYCHAIN_PASSWORD"
+    printf 'export MAC_SIGN_IDENTITY=%q\n' "$MAC_SIGN_IDENTITY"
+    printf 'export MAC_NOTARY_PROFILE=%q\n' "$MAC_NOTARY_PROFILE"
+    printf 'export MAC_REPO_DIR=%q\n' "$MAC_REPO_DIR"
+    cat <<'REMOTE'
 set -euo pipefail
 export PATH="/usr/bin:/usr/sbin:/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
-cd ~/Documents/google-mcp-rs
+cd "$MAC_REPO_DIR"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" ~/Library/Keychains/login.keychain-db
 cargo build --release --bin google-mcp --target aarch64-apple-darwin
 cargo build --release --bin google-mcp --target x86_64-apple-darwin
 mkdir -p dist
 lipo -create -output dist/google-mcp-macos-universal target/aarch64-apple-darwin/release/google-mcp target/x86_64-apple-darwin/release/google-mcp
 lipo -info dist/google-mcp-macos-universal
-codesign --force --options runtime --timestamp --sign "Developer ID Application: Mathieu-Philippe Bourgeois (339NPY258W)" dist/google-mcp-macos-universal
+codesign --force --options runtime --timestamp --sign "$MAC_SIGN_IDENTITY" dist/google-mcp-macos-universal
 codesign --verify --verbose=2 dist/google-mcp-macos-universal
 rm -f dist/notarize.zip
 ditto -c -k --keepParent dist/google-mcp-macos-universal dist/notarize.zip
 # Bare Mach-O binaries cannot be stapled; Gatekeeper checks the ticket online.
-xcrun notarytool submit dist/notarize.zip --keychain-profile wspr-notarize --wait
+xcrun notarytool submit dist/notarize.zip --keychain-profile "$MAC_NOTARY_PROFILE" --wait
 spctl -a -vvv -t install dist/google-mcp-macos-universal 2>&1 | grep -q 'source=Notarized Developer ID' || { echo "not notarized"; exit 1; }
 REMOTE
-  } | ssh mat-air bash -s | tee "$notarize_out"
+  } | ssh "$MAC_HOST" bash -s | tee "$notarize_out"
 
   grep -q 'status: Accepted' "$notarize_out" || die "notarytool did not report status: Accepted"
   rm -f "$notarize_out"
 
-  rsync mat-air:~/Documents/google-mcp-rs/dist/google-mcp-macos-universal dist/
+  rsync "$MAC_HOST:$MAC_REPO_DIR/dist/google-mcp-macos-universal" dist/
   chmod +x dist/google-mcp-macos-universal
 
-  out="$(ssh mat-air '$HOME/Documents/google-mcp-rs/dist/google-mcp-macos-universal --version')"
+  # shellcheck disable=SC2029
+  out="$(ssh "$MAC_HOST" "$MAC_REPO_DIR/dist/google-mcp-macos-universal --version")"
   [[ "$out" == "$expected" ]] || die "macos --version gave '$out', expected '$expected'"
 else
   echo "==> Skipping macOS build (--skip-mac)"

@@ -8,7 +8,8 @@ use rmcp::{ErrorData, tool, tool_router};
 use serde_json::{Value, json};
 
 use crate::errors::{McpError, to_mcp};
-use crate::google::tasks::{TasksClient, TasksError};
+use crate::google::tasks::TasksClient;
+use crate::mcp::common;
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
 
@@ -46,7 +47,7 @@ impl GoogleMcp {
             .get_tasklist(&p.tasklist_id)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_tasks_not_found(e, "tasklist", &id))
+            .map_err(|e| common::reclassify_not_found(e, "tasklist", &id, "tasks"))
     }
 
     #[tool(
@@ -58,7 +59,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<TasksCreateTasklistParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.title, "title")?;
+        common::ensure_non_empty(&p.title, "title", "tasks")?;
         let client = self.tasks_for(&parts).await?;
         client
             .create_tasklist(&p.title)
@@ -76,14 +77,14 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<TasksUpdateTasklistParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.title, "title")?;
+        common::ensure_non_empty(&p.title, "title", "tasks")?;
         let client = self.tasks_for(&parts).await?;
         let id = p.tasklist_id.clone();
         client
             .update_tasklist(&p.tasklist_id, &p.title)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_tasks_not_found(e, "tasklist", &id))
+            .map_err(|e| common::reclassify_not_found(e, "tasklist", &id, "tasks"))
     }
 
     #[tool(
@@ -101,7 +102,7 @@ impl GoogleMcp {
             .delete_tasklist(&p.tasklist_id)
             .await
             .map(|_| json!({"deleted": id}).to_string())
-            .map_err(|e| reclassify_tasks_not_found(e, "tasklist", &p.tasklist_id))
+            .map_err(|e| common::reclassify_not_found(e, "tasklist", &p.tasklist_id, "tasks"))
     }
 
     #[tool(
@@ -131,7 +132,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_tasks_not_found(e, "tasklist", &id))
+            .map_err(|e| common::reclassify_not_found(e, "tasklist", &id, "tasks"))
     }
 
     #[tool(name = "tasks_get", description = "Get one task by ID.")]
@@ -146,7 +147,7 @@ impl GoogleMcp {
             .get_task(&p.tasklist_id, &p.task_id)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_tasks_not_found(e, "task", &id))
+            .map_err(|e| common::reclassify_not_found(e, "task", &id, "tasks"))
     }
 
     #[tool(
@@ -158,7 +159,7 @@ impl GoogleMcp {
         Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<TasksCreateParams>,
     ) -> Result<String, ErrorData> {
-        ensure_non_empty(&p.title, "title")?;
+        common::ensure_non_empty(&p.title, "title", "tasks")?;
         ensure_notes_fit(p.notes.as_deref())?;
         let client = self.tasks_for(&parts).await?;
         let mut body = json!({"title": p.title});
@@ -181,7 +182,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_tasks_not_found(e, "tasklist", &id))
+            .map_err(|e| common::reclassify_not_found(e, "tasklist", &id, "tasks"))
     }
 
     #[tool(
@@ -224,7 +225,7 @@ impl GoogleMcp {
             .patch_task(&p.tasklist_id, &p.task_id, &body)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_tasks_not_found(e, "task", &id))
+            .map_err(|e| common::reclassify_not_found(e, "task", &id, "tasks"))
     }
 
     #[tool(
@@ -247,7 +248,7 @@ impl GoogleMcp {
             .patch_task(&p.tasklist_id, &p.task_id, &body)
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_tasks_not_found(e, "task", &id))
+            .map_err(|e| common::reclassify_not_found(e, "task", &id, "tasks"))
     }
 
     #[tool(
@@ -271,7 +272,7 @@ impl GoogleMcp {
             )
             .await
             .map(|v| v.to_string())
-            .map_err(|e| reclassify_tasks_not_found(e, "task", &id))
+            .map_err(|e| common::reclassify_not_found(e, "task", &id, "tasks"))
     }
 
     #[tool(
@@ -289,7 +290,7 @@ impl GoogleMcp {
             .delete_task(&p.tasklist_id, &p.task_id)
             .await
             .map(|_| json!({"deleted": id}).to_string())
-            .map_err(|e| reclassify_tasks_not_found(e, "task", &p.task_id))
+            .map_err(|e| common::reclassify_not_found(e, "task", &p.task_id, "tasks"))
     }
 
     #[tool(
@@ -307,7 +308,7 @@ impl GoogleMcp {
             .clear_completed(&p.tasklist_id)
             .await
             .map(|_| json!({"cleared": id}).to_string())
-            .map_err(|e| reclassify_tasks_not_found(e, "tasklist", &p.tasklist_id))
+            .map_err(|e| common::reclassify_not_found(e, "tasklist", &p.tasklist_id, "tasks"))
     }
 }
 
@@ -319,26 +320,6 @@ impl GoogleMcp {
             session.access_token,
         ))
     }
-}
-
-fn reclassify_tasks_not_found(e: TasksError, kind: &'static str, id: &str) -> ErrorData {
-    if let TasksError::Api { status, .. } = &e
-        && status.as_u16() == 404
-    {
-        return McpError::not_found(kind, id, "tasks").into();
-    }
-    to_mcp(e)
-}
-
-fn ensure_non_empty(s: &str, field: &str) -> Result<(), ErrorData> {
-    if s.trim().is_empty() {
-        return Err(
-            McpError::invalid_input(format!("`{field}` must not be empty"))
-                .with_service("tasks")
-                .into(),
-        );
-    }
-    Ok(())
 }
 
 /// Tasks rejects notes over 8192 characters with an opaque 400.
@@ -365,4 +346,37 @@ fn ensure_status(s: &str) -> Result<(), ErrorData> {
             .into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notes_fit_rejects_over_limit() {
+        let notes = "a".repeat(8193);
+        assert!(ensure_notes_fit(Some(&notes)).is_err());
+    }
+
+    #[test]
+    fn notes_fit_accepts_at_limit() {
+        let notes = "a".repeat(8192);
+        assert!(ensure_notes_fit(Some(&notes)).is_ok());
+    }
+
+    #[test]
+    fn notes_fit_accepts_none() {
+        assert!(ensure_notes_fit(None).is_ok());
+    }
+
+    #[test]
+    fn status_rejects_unknown() {
+        assert!(ensure_status("bogus").is_err());
+    }
+
+    #[test]
+    fn status_accepts_known_values() {
+        assert!(ensure_status("needsAction").is_ok());
+        assert!(ensure_status("completed").is_ok());
+    }
 }

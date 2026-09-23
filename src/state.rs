@@ -29,7 +29,6 @@ pub enum Tenancy {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)] // `http` is consumed by the Phase-3 Gmail client.
 pub struct AppState {
     pub config: Arc<ServerConfig>,
     pub db: Db,
