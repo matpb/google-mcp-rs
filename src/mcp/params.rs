@@ -245,6 +245,72 @@ pub struct GmailDeleteLabelParams {
 }
 
 // ---------------------------------------------------------------------------
+// Filters
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GmailFilterCriteria {
+    /// Sender to match: an address, a domain, or any Gmail `from:` term.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Recipient to match (To, Cc and Bcc).
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Case-insensitive phrase in the subject.
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// Gmail search query the message must match, same syntax as the search
+    /// box, e.g. `list:news.example.com` or `has:attachment larger:5M`.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Gmail search query the message must NOT match.
+    #[serde(default)]
+    pub negated_query: Option<String>,
+    /// `true` matches only messages with an attachment.
+    #[serde(default)]
+    pub has_attachment: Option<bool>,
+    /// `true` never matches chat messages.
+    #[serde(default)]
+    pub exclude_chats: Option<bool>,
+    /// Size threshold in bytes. Requires `size_comparison`.
+    #[serde(default)]
+    pub size: Option<u32>,
+    /// `larger` or `smaller`. Requires `size`.
+    #[serde(default)]
+    pub size_comparison: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GmailFilterAction {
+    /// Label IDs to add. User labels by ID from `gmail_list_labels`; system
+    /// IDs: `STARRED`, `IMPORTANT`, `TRASH` (delete).
+    #[serde(default)]
+    pub add_label_ids: Vec<String>,
+    /// Label IDs to remove: `INBOX` skips the inbox (archive), `UNREAD` marks
+    /// read, `IMPORTANT` never marks important, `SPAM` never sends to spam.
+    #[serde(default)]
+    pub remove_label_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GmailCreateFilterParams {
+    /// Which incoming messages match. At least one field required.
+    pub criteria: GmailFilterCriteria,
+    /// What happens to matching messages. At least one label change
+    /// required. Forwarding is not supported.
+    pub action: GmailFilterAction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GmailDeleteFilterParams {
+    /// Filter ID from `gmail_list_filters`.
+    pub id: String,
+}
+
+// ---------------------------------------------------------------------------
 // Organize
 // ---------------------------------------------------------------------------
 

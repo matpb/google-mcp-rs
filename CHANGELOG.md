@@ -5,6 +5,29 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-09-23
+
+### Added
+
+- **Gmail filter tools**: `gmail_list_filters` (list every filter with its
+  criteria and actions), `gmail_create_filter` (criteria: `from`, `to`,
+  `subject`, `query`, `negated_query`, `has_attachment`, `exclude_chats`,
+  `size` + `size_comparison` of `larger`/`smaller`; action: add/remove label
+  IDs only — forwarding is deliberately unsupported, since auto-forwarding is
+  an exfiltration vector), `gmail_delete_filter` (by ID). Gmail's API has no
+  filter update; editing a filter means delete then create. Full surface is
+  now **113 tools**.
+
+### Changed
+
+- Gmail now requests a second scope, `gmail.settings.basic`, alongside
+  `gmail.modify`. Connections authorized before this change lack it: their
+  existing Gmail tools keep working, but the new filter tools return
+  `auth_required` until the user re-authorizes at `/authorize` (or via
+  `/mcp` in Claude Code).
+- Gmail `403 ACCESS_TOKEN_SCOPE_INSUFFICIENT` responses now surface as
+  `auth_required` with a `reconnect_url` hint, instead of `permission_denied`.
+
 ## [0.11.0] - 2026-09-14
 
 ### Added

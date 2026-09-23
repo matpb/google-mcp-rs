@@ -4,13 +4,13 @@ A multi-tenant **Model Context Protocol** server for **Google Workspace**, writt
 
 It also runs in **single-tenant stdio mode** as a prebuilt binary that any local MCP client (Claude Code, Claude Desktop, Codex, Cursor) launches as a child process — no TLS certificate, no tunnel, no inbound network exposure.
 
-> **Status:** v0.11.0 — Gmail (25) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **110 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 111th tool, `google_authenticate`, handles in-chat sign-in.
+> **Status:** v0.11.0 — Gmail (28) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **113 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 114th tool, `google_authenticate`, handles in-chat sign-in.
 
 ## Why
 
 The first-party Google Workspace MCP server is missing fundamentals (you cannot send an email from it). Existing community servers are Python or single-tenant. `google-mcp-rs` aims to be the Rust server you actually want to deploy:
 
-- **Full Gmail / Sheets / Drive / Docs / Calendar / Tasks / Contacts / Search Console surface** — 110 tools covering email (search/threads/drafts/send/labels/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence), Google Tasks (task lists + tasks CRUD, subtasks, reordering, completion, cross-list moves), Google Contacts (contact CRUD, prefix search, contact groups/labels and their membership), and Google Search Console (properties, sitemaps, search analytics, URL inspection).
+- **Full Gmail / Sheets / Drive / Docs / Calendar / Tasks / Contacts / Search Console surface** — 113 tools covering email (search/threads/drafts/send/labels/filters/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence), Google Tasks (task lists + tasks CRUD, subtasks, reordering, completion, cross-list moves), Google Contacts (contact CRUD, prefix search, contact groups/labels and their membership), and Google Search Console (properties, sitemaps, search analytics, URL inspection).
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256.
 - **Two transports, one binary** — **streamable HTTP** (multi-tenant: one running instance serves many MCP clients and many Google accounts at once), or **stdio** (single-tenant: your MCP client launches it as a local child process, no TLS and nothing on the network). See [Quick start — prebuilt binary (stdio)](#quick-start--prebuilt-binary-stdio).
@@ -130,6 +130,7 @@ In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
    - `openid`
    - `email`
    - `https://www.googleapis.com/auth/gmail.modify`
+   - `https://www.googleapis.com/auth/gmail.settings.basic`
    - `https://www.googleapis.com/auth/spreadsheets`
    - `https://www.googleapis.com/auth/drive`
    - `https://www.googleapis.com/auth/documents`
@@ -194,14 +195,14 @@ For **Claude.ai / ChatGPT custom connectors / Cursor**, add a custom connector p
 
 ## Scoping the surface
 
-By default, the server exposes all 110 tools across all eight Workspace domains and asks Google for the matching scope set during consent. For deployments that only need part of the surface, set `ENABLED_DOMAINS` to a comma-separated subset:
+By default, the server exposes all 113 tools across all eight Workspace domains and asks Google for the matching scope set during consent. For deployments that only need part of the surface, set `ENABLED_DOMAINS` to a comma-separated subset:
 
 ```bash
-ENABLED_DOMAINS=gmail            # Gmail-only: 25 tools, gmail.modify scope
-ENABLED_DOMAINS=gmail,calendar   # email + calendaring: 39 tools
+ENABLED_DOMAINS=gmail            # Gmail-only: 28 tools, gmail.modify + gmail.settings.basic scopes
+ENABLED_DOMAINS=gmail,calendar   # email + calendaring: 42 tools
 ENABLED_DOMAINS=docs,drive       # document workflow: 26 tools
 ENABLED_DOMAINS=calendar,tasks   # planning only: 27 tools
-ENABLED_DOMAINS=gmail,people     # email + address book: 38 tools
+ENABLED_DOMAINS=gmail,people     # email + address book: 41 tools
 ENABLED_DOMAINS=searchconsole   # SEO only: 8 tools, webmasters scope
 ```
 
@@ -250,7 +251,7 @@ Anything under a `keep/` subdirectory of `FILE_ROOT` is invisible to `files_clea
 
 ## Tools
 
-### Gmail (25)
+### Gmail (28)
 
 | Tool | Purpose |
 |---|---|
@@ -273,12 +274,17 @@ Anything under a `keep/` subdirectory of `FILE_ROOT` is invisible to `files_clea
 | `gmail_create_label` | Create a label (with optional color) |
 | `gmail_update_label` | Rename or restyle a label |
 | `gmail_delete_label` | Delete a label |
+| `gmail_list_filters` | List every filter, with its criteria and actions |
+| `gmail_create_filter` | Create a filter (criteria: from/to/subject/query/negated_query/has_attachment/exclude_chats/size+size_comparison; action: add/remove label IDs only, no forwarding). Gmail has no filter update — edit means delete then create |
+| `gmail_delete_filter` | Delete a filter by ID |
 | `gmail_modify_labels` | Add/remove labels on a message OR thread |
 | `gmail_mark_read` | Mark messages as read |
 | `gmail_mark_unread` | Mark messages as unread |
 | `gmail_archive` | Archive messages |
 | `gmail_trash` | Move messages to trash |
 | `gmail_get_profile` | Return the connected account email and granted scopes |
+
+> **Filter tools need a new scope.** `gmail_list_filters` / `gmail_create_filter` / `gmail_delete_filter` require `gmail.settings.basic`, which connections authorized before this change don't have. Their other Gmail tools keep working; the filter tools return `auth_required` (`ACCESS_TOKEN_SCOPE_INSUFFICIENT`) until the user re-authorizes at `/authorize` (in Claude Code: `/mcp`, pick the server, re-authenticate).
 
 ### Sheets (11)
 

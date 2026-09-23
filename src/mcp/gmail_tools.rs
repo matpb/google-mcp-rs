@@ -12,7 +12,8 @@ use crate::errors::{McpError, to_mcp};
 use crate::files::FileJail;
 use crate::google::drive::DriveClient;
 use crate::google::gmail::{
-    CreateLabel, GmailClient, GmailError, LabelColor, ModifyLabels, UpdateLabel,
+    CreateFilter, CreateLabel, FilterAction, FilterCriteria, GmailClient, GmailError, LabelColor,
+    ModifyLabels, UpdateLabel,
 };
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
@@ -508,6 +509,58 @@ impl GoogleMcp {
     }
 
     // -----------------------------------------------------------------
+    // Filters
+    // -----------------------------------------------------------------
+
+    #[tool(
+        name = "gmail_list_filters",
+        description = "List every Gmail filter with its id, criteria and action. Needs the gmail.settings.basic scope: a connection authorized before filter support returns auth_required and must be re-authorized."
+    )]
+    async fn gmail_list_filters(
+        &self,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, ErrorData> {
+        let client = self.gmail_for(&parts).await?;
+        let mut v = client.list_filters().await.map_err(to_mcp)?;
+        if v.get("filter").is_none() {
+            v = json!({"filter": []});
+        }
+        Ok(v.to_string())
+    }
+
+    #[tool(
+        name = "gmail_create_filter",
+        description = "Create a Gmail filter for incoming mail (it does not touch existing messages). `criteria` needs at least one field, `action` at least one label change. Actions are label edits only: user label IDs from gmail_list_labels plus system IDs (remove INBOX = skip inbox, remove UNREAD = mark read, add STARRED, add/remove IMPORTANT, add TRASH = delete, remove SPAM = never spam). Forwarding is deliberately unsupported. Gmail has no filter update: to edit one, gmail_delete_filter it and create the replacement. Returns the created filter."
+    )]
+    async fn gmail_create_filter(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<GmailCreateFilterParams>,
+    ) -> Result<String, ErrorData> {
+        let body = build_filter(p)?;
+        let client = self.gmail_for(&parts).await?;
+        let v = client.create_filter(&body).await.map_err(to_mcp)?;
+        Ok(v.to_string())
+    }
+
+    #[tool(
+        name = "gmail_delete_filter",
+        description = "Delete a Gmail filter by ID (from gmail_list_filters). Messages it already labeled stay as they are."
+    )]
+    async fn gmail_delete_filter(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<GmailDeleteFilterParams>,
+    ) -> Result<String, ErrorData> {
+        let client = self.gmail_for(&parts).await?;
+        let v = client
+            .delete_filter(&p.id)
+            .await
+            .map_err(|e| reclassify_not_found(e, "filter", &p.id))?;
+        Ok(v.to_string())
+    }
+
+    // -----------------------------------------------------------------
     // Organize
     // -----------------------------------------------------------------
 
@@ -968,5 +1021,219 @@ impl LabelTarget {
     }
 }
 
+fn trimmed(s: Option<String>) -> Option<String> {
+    s.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    })
+}
+
+fn build_filter(p: GmailCreateFilterParams) -> Result<CreateFilter, ErrorData> {
+    let GmailCreateFilterParams { criteria, action } = p;
+    let from = trimmed(criteria.from);
+    let to = trimmed(criteria.to);
+    let subject = trimmed(criteria.subject);
+    let query = trimmed(criteria.query);
+    let negated_query = trimmed(criteria.negated_query);
+    let has_attachment = criteria.has_attachment;
+    let exclude_chats = criteria.exclude_chats;
+    let size = criteria.size;
+    let size_comparison = criteria.size_comparison;
+
+    if let Some(cmp) = &size_comparison
+        && cmp != "larger"
+        && cmp != "smaller"
+    {
+        return Err(
+            McpError::invalid_input(format!("unknown `size_comparison` value '{cmp}'"))
+                .with_hint("Use `larger` or `smaller`.")
+                .into(),
+        );
+    }
+    if size.is_some() != size_comparison.is_some() {
+        return Err(
+            McpError::invalid_input("`size` and `size_comparison` must be set together").into(),
+        );
+    }
+
+    let has_criteria = from.is_some()
+        || to.is_some()
+        || subject.is_some()
+        || query.is_some()
+        || negated_query.is_some()
+        || has_attachment == Some(true)
+        || exclude_chats == Some(true)
+        || size.is_some();
+    if !has_criteria {
+        return Err(McpError::invalid_input(
+            "`criteria` needs at least one of from, to, subject, query, negated_query, has_attachment, exclude_chats, size",
+        )
+        .into());
+    }
+
+    let add_label_ids: Vec<String> = action
+        .add_label_ids
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let remove_label_ids: Vec<String> = action
+        .remove_label_ids
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if add_label_ids.is_empty() && remove_label_ids.is_empty() {
+        return Err(McpError::invalid_input(
+            "`action` needs at least one label in add_label_ids or remove_label_ids",
+        )
+        .into());
+    }
+
+    Ok(CreateFilter {
+        criteria: FilterCriteria {
+            from,
+            to,
+            subject,
+            query,
+            negated_query,
+            has_attachment,
+            exclude_chats,
+            size,
+            size_comparison,
+        },
+        action: FilterAction {
+            add_label_ids,
+            remove_label_ids,
+        },
+    })
+}
+
 #[allow(dead_code)]
 fn _gmail_error_marker(_: GmailError) {} // silence unused-import warning if any
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn params(v: Value) -> Result<GmailCreateFilterParams, serde_json::Error> {
+        serde_json::from_value(v)
+    }
+
+    #[test]
+    fn valid_from_and_remove_inbox_builds_and_trims() {
+        let p = params(json!({
+            "criteria": {"from": "  boss@example.com  "},
+            "action": {"remove_label_ids": ["INBOX"]}
+        }))
+        .unwrap();
+        let filter = build_filter(p).unwrap();
+        assert_eq!(filter.criteria.from.as_deref(), Some("boss@example.com"));
+        assert_eq!(filter.action.remove_label_ids, vec!["INBOX".to_string()]);
+    }
+
+    #[test]
+    fn forward_field_is_rejected_at_deserialize() {
+        let err = params(json!({
+            "criteria": {"from": "x@example.com"},
+            "action": {"forward": "x@evil.com"}
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("forward"));
+    }
+
+    #[test]
+    fn unknown_criteria_field_is_rejected_at_deserialize() {
+        let err = params(json!({
+            "criteria": {"sender": "x"},
+            "action": {"add_label_ids": ["STARRED"]}
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("sender"));
+    }
+
+    #[test]
+    fn empty_criteria_is_rejected() {
+        let p = params(json!({"criteria": {}, "action": {"add_label_ids": ["STARRED"]}})).unwrap();
+        let err: ErrorData = build_filter(p).unwrap_err();
+        assert!(err.message.contains("criteria"));
+    }
+
+    #[test]
+    fn has_attachment_false_alone_is_not_criteria() {
+        let p = params(json!({
+            "criteria": {"has_attachment": false},
+            "action": {"add_label_ids": ["STARRED"]}
+        }))
+        .unwrap();
+        let err: ErrorData = build_filter(p).unwrap_err();
+        assert!(err.message.contains("criteria"));
+    }
+
+    #[test]
+    fn whitespace_only_from_is_rejected() {
+        let p = params(json!({
+            "criteria": {"from": "   "},
+            "action": {"add_label_ids": ["STARRED"]}
+        }))
+        .unwrap();
+        let err: ErrorData = build_filter(p).unwrap_err();
+        assert!(err.message.contains("criteria"));
+    }
+
+    #[test]
+    fn empty_action_is_rejected() {
+        let p = params(json!({"criteria": {"from": "x@example.com"}, "action": {}})).unwrap();
+        let err: ErrorData = build_filter(p).unwrap_err();
+        assert!(err.message.contains("action"));
+    }
+
+    #[test]
+    fn action_with_only_whitespace_label_is_rejected() {
+        let p = params(json!({
+            "criteria": {"from": "x@example.com"},
+            "action": {"add_label_ids": [" "]}
+        }))
+        .unwrap();
+        let err: ErrorData = build_filter(p).unwrap_err();
+        assert!(err.message.contains("action"));
+    }
+
+    #[test]
+    fn size_without_comparison_is_rejected() {
+        let p = params(json!({
+            "criteria": {"size": 1000},
+            "action": {"add_label_ids": ["STARRED"]}
+        }))
+        .unwrap();
+        let err: ErrorData = build_filter(p).unwrap_err();
+        assert!(err.message.contains("size"));
+    }
+
+    #[test]
+    fn unknown_size_comparison_is_rejected() {
+        let p = params(json!({
+            "criteria": {"size": 1000, "size_comparison": "bigger"},
+            "action": {"add_label_ids": ["STARRED"]}
+        }))
+        .unwrap();
+        let err: ErrorData = build_filter(p).unwrap_err();
+        assert!(err.message.contains("size_comparison"));
+    }
+
+    #[test]
+    fn size_and_larger_alone_is_valid_criteria() {
+        let p = params(json!({
+            "criteria": {"size": 1000000, "size_comparison": "larger"},
+            "action": {"add_label_ids": ["STARRED"]}
+        }))
+        .unwrap();
+        let filter = build_filter(p).unwrap();
+        assert_eq!(filter.criteria.size, Some(1_000_000));
+    }
+}

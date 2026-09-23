@@ -78,6 +78,42 @@ pub struct UpdateLabel {
     pub color: Option<LabelColor>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FilterCriteria {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(rename = "negatedQuery", skip_serializing_if = "Option::is_none")]
+    pub negated_query: Option<String>,
+    #[serde(rename = "hasAttachment", skip_serializing_if = "Option::is_none")]
+    pub has_attachment: Option<bool>,
+    #[serde(rename = "excludeChats", skip_serializing_if = "Option::is_none")]
+    pub exclude_chats: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+    #[serde(rename = "sizeComparison", skip_serializing_if = "Option::is_none")]
+    pub size_comparison: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FilterAction {
+    #[serde(rename = "addLabelIds", skip_serializing_if = "Vec::is_empty")]
+    pub add_label_ids: Vec<String>,
+    #[serde(rename = "removeLabelIds", skip_serializing_if = "Vec::is_empty")]
+    pub remove_label_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateFilter {
+    pub criteria: FilterCriteria,
+    pub action: FilterAction,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LabelColor {
     /// Background color hex (Gmail's restricted palette, e.g. `#16a766`).
@@ -382,6 +418,37 @@ impl GmailClient {
             .await
     }
 
+    // --- filters -----------------------------------------------------------
+
+    pub async fn list_filters(&self) -> Result<Value, GmailError> {
+        self.request(
+            Method::GET,
+            format!("{BASE}/settings/filters"),
+            None::<&()>,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn create_filter(&self, body: &CreateFilter) -> Result<Value, GmailError> {
+        self.request(
+            Method::POST,
+            format!("{BASE}/settings/filters"),
+            Some(body),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_filter(&self, id: &str) -> Result<Value, GmailError> {
+        self.request_empty_ok(
+            Method::DELETE,
+            format!("{BASE}/settings/filters/{id}"),
+            None::<&()>,
+        )
+        .await
+    }
+
     // --- internals -------------------------------------------------------
 
     async fn request<B: Serialize + ?Sized>(
@@ -459,6 +526,8 @@ fn parse_error(status: StatusCode, body: &str) -> GmailError {
         errors: Option<Vec<ErrorDetail>>,
         #[serde(default)]
         status: Option<String>,
+        #[serde(default)]
+        details: Option<Vec<ErrorInfo>>,
     }
     #[derive(Deserialize)]
     struct ErrorDetail {
@@ -468,6 +537,11 @@ fn parse_error(status: StatusCode, body: &str) -> GmailError {
         domain: Option<String>,
         #[serde(default)]
         message: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct ErrorInfo {
+        #[serde(default)]
+        reason: Option<String>,
     }
     if let Ok(parsed) = serde_json::from_str::<ApiErrorWrapper>(body) {
         let detail = parsed.error.errors.as_ref().and_then(|errs| {
@@ -479,9 +553,18 @@ fn parse_error(status: StatusCode, body: &str) -> GmailError {
             })
         });
         let _ = parsed.error.code;
+        let scope_insufficient = parsed.error.details.as_ref().is_some_and(|ds| {
+            ds.iter()
+                .any(|d| d.reason.as_deref() == Some("ACCESS_TOKEN_SCOPE_INSUFFICIENT"))
+        });
+        let message = if scope_insufficient {
+            "ACCESS_TOKEN_SCOPE_INSUFFICIENT".to_string()
+        } else {
+            parsed.error.status.unwrap_or(parsed.error.message)
+        };
         return GmailError::Api {
             status,
-            message: parsed.error.status.unwrap_or(parsed.error.message),
+            message,
             details: detail,
         };
     }
@@ -489,5 +572,75 @@ fn parse_error(status: StatusCode, body: &str) -> GmailError {
         status,
         message: body.chars().take(400).collect(),
         details: None,
+    }
+}
+
+impl GmailError {
+    pub fn is_insufficient_scope(&self) -> bool {
+        match self {
+            GmailError::Api {
+                status,
+                message,
+                details,
+                ..
+            } if *status == StatusCode::FORBIDDEN => {
+                message.contains("ACCESS_TOKEN_SCOPE_INSUFFICIENT")
+                    || message.contains("insufficient authentication scopes")
+                    || details
+                        .as_deref()
+                        .is_some_and(|d| d.contains("/insufficientPermissions:"))
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn insufficient_scope_error_info_is_detected() {
+        let body = r#"{"error":{"code":403,"message":"Request had insufficient authentication scopes.","errors":[{"message":"Insufficient Permission","domain":"global","reason":"insufficientPermissions"}],"status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT","domain":"googleapis.com","metadata":{"service":"gmail.googleapis.com","method":"caribou.api.proto.MailboxService.ListFilters"}}]}}"#;
+        let err = parse_error(StatusCode::FORBIDDEN, body);
+        assert!(err.is_insufficient_scope());
+    }
+
+    #[test]
+    fn plain_forbidden_without_error_info_is_not_insufficient_scope() {
+        let body = r#"{"error":{"code":403,"message":"Forbidden","errors":[{"message":"x","domain":"global","reason":"forbidden"}],"status":"PERMISSION_DENIED"}}"#;
+        let err = parse_error(StatusCode::FORBIDDEN, body);
+        assert!(!err.is_insufficient_scope());
+    }
+
+    #[test]
+    fn create_filter_serializes_only_set_fields() {
+        let filter = CreateFilter {
+            criteria: FilterCriteria {
+                from: Some("boss@example.com".into()),
+                size: Some(1_000_000),
+                size_comparison: Some("larger".into()),
+                ..Default::default()
+            },
+            action: FilterAction {
+                remove_label_ids: vec!["INBOX".into()],
+                ..Default::default()
+            },
+        };
+        let v = serde_json::to_value(&filter).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "criteria": {
+                    "from": "boss@example.com",
+                    "size": 1_000_000,
+                    "sizeComparison": "larger"
+                },
+                "action": {
+                    "removeLabelIds": ["INBOX"]
+                }
+            })
+        );
     }
 }

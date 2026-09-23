@@ -243,6 +243,7 @@ mod tests {
         assert!(url.contains("state=state-abc"));
         assert!(url.contains("scope=openid"));
         assert!(url.contains("gmail.modify"));
+        assert!(url.contains("gmail.settings.basic"));
     }
 
     #[test]

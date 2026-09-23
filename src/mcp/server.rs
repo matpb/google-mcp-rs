@@ -230,7 +230,7 @@ mod harness {
     /// continue to mean something.
     pub(crate) fn expected_count(d: Domain) -> usize {
         match d {
-            Domain::Gmail => 25,
+            Domain::Gmail => 28,
             Domain::Sheets => 11,
             Domain::Drive => 14,
             Domain::Docs => 12,
@@ -398,6 +398,42 @@ mod tests {
             names.len(),
             "duplicate tool name in composed router — two domains define the same tool"
         );
+    }
+
+    #[tokio::test]
+    async fn gmail_filter_tools_registered_and_action_schema_is_closed() {
+        let mcp = make_mcp(vec![Domain::Gmail]).await;
+        let tools = mcp.tool_router.list_all();
+        for name in [
+            "gmail_list_filters",
+            "gmail_create_filter",
+            "gmail_delete_filter",
+        ] {
+            assert!(
+                tools.iter().any(|t| t.name == name),
+                "{name} not registered"
+            );
+        }
+        let create = tools
+            .iter()
+            .find(|t| t.name == "gmail_create_filter")
+            .unwrap();
+        let schema = serde_json::Value::Object((*create.input_schema).clone());
+        let defs = schema
+            .get("$defs")
+            .or_else(|| schema.get("definitions"))
+            .expect("nested defs");
+        let action = &defs["GmailFilterAction"];
+        let mut keys: Vec<_> = action["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        assert_eq!(keys, vec!["add_label_ids", "remove_label_ids"]);
+        assert_eq!(action["additionalProperties"], serde_json::json!(false));
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
     }
 
     #[tokio::test]

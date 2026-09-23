@@ -41,17 +41,20 @@ impl Domain {
         }
     }
 
-    /// The Google OAuth scope this domain requires.
-    pub fn google_scope(&self) -> &'static str {
+    /// The Google OAuth scopes this domain requires.
+    pub fn google_scopes(&self) -> &'static [&'static str] {
         match self {
-            Domain::Gmail => "https://www.googleapis.com/auth/gmail.modify",
-            Domain::Sheets => "https://www.googleapis.com/auth/spreadsheets",
-            Domain::Drive => "https://www.googleapis.com/auth/drive",
-            Domain::Docs => "https://www.googleapis.com/auth/documents",
-            Domain::Calendar => "https://www.googleapis.com/auth/calendar",
-            Domain::Tasks => "https://www.googleapis.com/auth/tasks",
-            Domain::People => "https://www.googleapis.com/auth/contacts",
-            Domain::SearchConsole => "https://www.googleapis.com/auth/webmasters",
+            Domain::Gmail => &[
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.settings.basic",
+            ],
+            Domain::Sheets => &["https://www.googleapis.com/auth/spreadsheets"],
+            Domain::Drive => &["https://www.googleapis.com/auth/drive"],
+            Domain::Docs => &["https://www.googleapis.com/auth/documents"],
+            Domain::Calendar => &["https://www.googleapis.com/auth/calendar"],
+            Domain::Tasks => &["https://www.googleapis.com/auth/tasks"],
+            Domain::People => &["https://www.googleapis.com/auth/contacts"],
+            Domain::SearchConsole => &["https://www.googleapis.com/auth/webmasters"],
         }
     }
 }
@@ -115,7 +118,7 @@ pub fn parse_enabled(raw: Option<&str>) -> Result<Vec<Domain>, String> {
 pub fn google_scopes(domains: &[Domain]) -> Vec<String> {
     let mut s: Vec<String> = vec!["openid".to_string(), "email".to_string()];
     for d in domains {
-        s.push(d.google_scope().to_string());
+        s.extend(d.google_scopes().iter().map(|x| x.to_string()));
     }
     s
 }
@@ -180,36 +183,39 @@ mod tests {
     #[test]
     fn google_scope_per_domain_is_exact() {
         assert_eq!(
-            Domain::Gmail.google_scope(),
-            "https://www.googleapis.com/auth/gmail.modify"
+            Domain::Gmail.google_scopes(),
+            &[
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.settings.basic",
+            ]
         );
         assert_eq!(
-            Domain::Sheets.google_scope(),
-            "https://www.googleapis.com/auth/spreadsheets"
+            Domain::Sheets.google_scopes(),
+            &["https://www.googleapis.com/auth/spreadsheets"]
         );
         assert_eq!(
-            Domain::Drive.google_scope(),
-            "https://www.googleapis.com/auth/drive"
+            Domain::Drive.google_scopes(),
+            &["https://www.googleapis.com/auth/drive"]
         );
         assert_eq!(
-            Domain::Docs.google_scope(),
-            "https://www.googleapis.com/auth/documents"
+            Domain::Docs.google_scopes(),
+            &["https://www.googleapis.com/auth/documents"]
         );
         assert_eq!(
-            Domain::Calendar.google_scope(),
-            "https://www.googleapis.com/auth/calendar"
+            Domain::Calendar.google_scopes(),
+            &["https://www.googleapis.com/auth/calendar"]
         );
         assert_eq!(
-            Domain::Tasks.google_scope(),
-            "https://www.googleapis.com/auth/tasks"
+            Domain::Tasks.google_scopes(),
+            &["https://www.googleapis.com/auth/tasks"]
         );
         assert_eq!(
-            Domain::People.google_scope(),
-            "https://www.googleapis.com/auth/contacts"
+            Domain::People.google_scopes(),
+            &["https://www.googleapis.com/auth/contacts"]
         );
         assert_eq!(
-            Domain::SearchConsole.google_scope(),
-            "https://www.googleapis.com/auth/webmasters"
+            Domain::SearchConsole.google_scopes(),
+            &["https://www.googleapis.com/auth/webmasters"]
         );
     }
 
@@ -217,13 +223,16 @@ mod tests {
     fn google_scopes_for_each_single_domain() {
         for d in Domain::ALL {
             let s = google_scopes(&[d]);
-            assert_eq!(s.len(), 3, "{d}: should produce exactly openid+email+1");
+            assert_eq!(
+                s.len(),
+                2 + d.google_scopes().len(),
+                "{d}: should produce exactly openid+email+its own scopes"
+            );
             assert!(s.contains(&"openid".to_string()), "{d}: missing openid");
             assert!(s.contains(&"email".to_string()), "{d}: missing email");
-            assert!(
-                s.contains(&d.google_scope().to_string()),
-                "{d}: missing its own google_scope"
-            );
+            for scope in d.google_scopes() {
+                assert!(s.contains(&scope.to_string()), "{d}: missing scope {scope}");
+            }
         }
     }
 
@@ -278,15 +287,17 @@ mod tests {
         assert!(s.contains(&"openid".to_string()));
         assert!(s.contains(&"email".to_string()));
         assert!(s.iter().any(|x| x.contains("gmail.modify")));
-        assert_eq!(s.len(), 3);
+        assert!(s.iter().any(|x| x.contains("gmail.settings.basic")));
+        assert_eq!(s.len(), 4);
     }
 
     #[test]
     fn google_scopes_for_all_returns_full_set() {
         let s = google_scopes(&Domain::ALL);
-        assert_eq!(s.len(), 10);
+        assert_eq!(s.len(), 11);
         for needle in [
             "gmail.modify",
+            "gmail.settings.basic",
             "spreadsheets",
             "/drive",
             "documents",

@@ -214,6 +214,7 @@ fn default_not_found_hint(kind: &str) -> String {
         "thread" => "Use gmail_search_threads to discover valid thread IDs.".into(),
         "draft" => "Use gmail_list_drafts to discover valid draft IDs.".into(),
         "label" => "Use gmail_list_labels to discover valid label IDs.".into(),
+        "filter" => "Use gmail_list_filters to discover valid filter IDs.".into(),
         "attachment" => "Use gmail_list_attachments to discover valid attachment IDs for a message.".into(),
         "file" => "Use drive_list_files to discover valid file IDs.".into(),
         "spreadsheet" => "Use drive_list_files with `mimeType = 'application/vnd.google-apps.spreadsheet'` to find spreadsheets.".into(),
@@ -238,6 +239,20 @@ pub fn to_mcp<E: Into<McpError>>(e: E) -> ErrorData {
 
 impl From<GmailError> for McpError {
     fn from(e: GmailError) -> Self {
+        if e.is_insufficient_scope() {
+            return McpError {
+                category: Category::AuthRequired,
+                message: "Gmail rejected the call: this connection was authorized without an OAuth scope this tool needs (ACCESS_TOKEN_SCOPE_INSUFFICIENT)".into(),
+                service: Some("gmail"),
+                http_status: Some(403),
+                upstream_reason: Some("ACCESS_TOKEN_SCOPE_INSUFFICIENT".into()),
+                retry_after_ms: None,
+                hint: Some("Re-authorize the Gmail connection: reconnect this MCP server from the client (in Claude Code, `/mcp`, pick the server, re-authenticate). The consent screen grants the current scope set, including gmail.settings.basic for the gmail_*_filter tools.".into()),
+                resource_kind: None,
+                resource_id: None,
+                reconnect_url: Some("/authorize".into()),
+            };
+        }
         match e {
             GmailError::Http(err) => transient_from_reqwest("gmail", err),
             GmailError::Api {
@@ -651,7 +666,7 @@ fn oauth_hint(err: &str) -> Option<String> {
     match err {
         "invalid_grant" => Some("Refresh token revoked or expired. User must re-authorize via /authorize.".into()),
         "invalid_scope" => Some(
-            "The OAuth client is missing a scope this MCP requires. Add openid, email, gmail.modify, spreadsheets, drive to the consent screen in the GCP console."
+            "The OAuth client is missing a scope this MCP requires. Add every scope in this server's `scopes_supported` metadata (for Gmail: gmail.modify and gmail.settings.basic) to the consent screen's Data Access in the GCP console."
                 .into(),
         ),
         _ => None,
@@ -826,6 +841,29 @@ mod tests {
         assert_eq!(err.category, Category::InvalidInput);
         assert!(err.message.contains("24 MB"));
         assert!(err.hint.unwrap().to_lowercase().contains("reduce"));
+    }
+
+    #[test]
+    fn gmail_insufficient_scope_classifies_as_auth_required() {
+        let e = GmailError::Api {
+            status: http::StatusCode::FORBIDDEN,
+            message: "PERMISSION_DENIED".into(),
+            details: Some("global/insufficientPermissions: Insufficient Permission".into()),
+        };
+        let err: McpError = e.into();
+        assert_eq!(err.category, Category::AuthRequired);
+        assert_eq!(err.reconnect_url, Some("/authorize".to_string()));
+    }
+
+    #[test]
+    fn gmail_plain_forbidden_still_classifies_as_permission_denied() {
+        let e = GmailError::Api {
+            status: http::StatusCode::FORBIDDEN,
+            message: "PERMISSION_DENIED".into(),
+            details: Some("global/forbidden: x".into()),
+        };
+        let err: McpError = e.into();
+        assert_eq!(err.category, Category::PermissionDenied);
     }
 
     #[test]
