@@ -34,7 +34,7 @@ serde_json = "1"
 serde_urlencoded = "0.7"
 
 # OAuth + crypto
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 sha2 = "0.10"
 base64ct = { version = "1.6", features = ["alloc"] }
 base64 = "0.22"
