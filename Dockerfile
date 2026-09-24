@@ -1,5 +1,5 @@
-# rust:1.94-alpine
-FROM rust@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 AS builder
+# Tag and digest together, so digest bumps stay on this tag.
+FROM rust:1.94-alpine@sha256:77237dd363a0b127bb5ef532c2d64c0deb380b738e43a9c4bdac73398d6d0a08 AS builder
 WORKDIR /build
 RUN apk upgrade --no-cache && apk add --no-cache musl-dev
 
@@ -18,8 +18,7 @@ RUN touch src/main.rs && \
     cargo build --release --locked && \
     mkdir /data
 
-# gcr.io/distroless/cc-debian12:nonroot
-FROM gcr.io/distroless/cc-debian12@sha256:e5d81ddde149641e2a9ba55be4545bc125c67de07508b03ba4c22e6eb0ded5aa
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 LABEL org.opencontainers.image.source="https://github.com/matpb/google-mcp-rs" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.description="Multi-tenant Rust MCP server for Google Workspace"
