@@ -4,8 +4,8 @@
 //! `STORAGE_ENCRYPTION_KEY`, with the user's stable Google `sub` bound as
 //! AAD so that swapping ciphertext between rows fails decryption.
 
-use aes_gcm::aead::{Aead, OsRng, Payload};
-use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
+use aes_gcm::aead::{Aead, Nonce, Payload};
+use aes_gcm::{Aes256Gcm, Key, KeyInit};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
@@ -24,8 +24,10 @@ pub struct Sealed {
 }
 
 pub fn seal(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Sealed, CryptoError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
+    let mut nonce_bytes = [0u8; 12];
+    getrandom::fill(&mut nonce_bytes).map_err(|_| CryptoError::Encrypt)?;
+    let nonce = Nonce::<Aes256Gcm>::from(nonce_bytes);
     let ciphertext = cipher
         .encrypt(
             &nonce,
@@ -50,11 +52,11 @@ pub fn unseal(
     if nonce.len() != 12 {
         return Err(CryptoError::InvalidNonce);
     }
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Nonce::from_slice(nonce);
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
+    let nonce = Nonce::<Aes256Gcm>::try_from(nonce).map_err(|_| CryptoError::InvalidNonce)?;
     cipher
         .decrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: ciphertext,
                 aad,
@@ -122,5 +124,26 @@ mod tests {
         let sealed = seal(&key(), b"sub", b"data").unwrap();
         let err = unseal(&key(), b"sub", &[0u8; 8], &sealed.ciphertext).unwrap_err();
         assert!(matches!(err, CryptoError::InvalidNonce));
+    }
+
+    // Fixture pinned against aes-gcm 0.10 output; must keep decrypting after the 0.11 upgrade.
+    #[test]
+    fn fixture_ciphertext_from_aes_gcm_0_10_still_decrypts() {
+        let key = key();
+        let nonce: [u8; 12] = core::array::from_fn(|i| (i as u8) ^ 0xAA);
+        let aad = b"fixture-google-sub-0.10";
+        let plaintext: &[u8] = b"fixture-refresh-token-plaintext";
+        // Hex ciphertext produced once by the 0.10 code path with this exact key/nonce/aad/plaintext.
+        let ciphertext_hex = "1417e7dadd651b5467877a42da2dc348f6d5de2113b001ced9fe99f7a1897fb2de5936336f9d6bf09fc56100216054";
+        let ciphertext = decode_hex(ciphertext_hex);
+        let recovered = unseal(&key, aad, &nonce, &ciphertext).expect("fixture must decrypt");
+        assert_eq!(recovered, plaintext);
+    }
+
+    fn decode_hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 }

@@ -3,10 +3,8 @@
 
 use argon2::Argon2;
 #[cfg(test)]
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::{PasswordHash, PasswordVerifier};
-#[cfg(test)]
-use argon2::password_hash::{PasswordHasher, SaltString};
+use argon2::password_hash::PasswordHasher;
+use argon2::password_hash::PasswordVerifier;
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 
@@ -53,9 +51,8 @@ pub fn hash_secret(secret: &str) -> String {
 /// Legacy Argon2id hashing, kept only to produce a fixture for `verify_secret_argon2` tests.
 #[cfg(test)]
 fn hash_secret_argon2(secret: &str) -> Result<String, DbError> {
-    let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
-        .hash_password(secret.as_bytes(), &salt)
+        .hash_password(secret.as_bytes())
         .map(|p| p.to_string())
         .map_err(|e| DbError::PasswordHash(e.to_string()))
 }
@@ -74,11 +71,8 @@ pub async fn verify_secret(secret: &str, hash: &str) -> bool {
 }
 
 fn verify_secret_argon2(secret: &str, hash: &str) -> bool {
-    let Ok(parsed) = PasswordHash::new(hash) else {
-        return false;
-    };
     Argon2::default()
-        .verify_password(secret.as_bytes(), &parsed)
+        .verify_password(secret.as_bytes(), hash)
         .is_ok()
 }
 
@@ -188,6 +182,14 @@ mod tests {
         assert!(h.starts_with("$argon2"));
         assert!(verify_secret("legacy-secret", &h).await);
         assert!(!verify_secret("wrong", &h).await);
+    }
+
+    // PHC string produced once by argon2 0.5; must keep verifying after the 0.6 upgrade.
+    #[tokio::test]
+    async fn legacy_argon2_phc_from_0_5_still_verifies() {
+        let phc = "$argon2id$v=19$m=19456,t=2,p=1$kvC/VxHWUiW2ULQJp+xlaQ$r8F1uYcdwlBB53LHZDGdfqxHdRE6oFdJXvXREKqeDXo";
+        assert!(verify_secret("legacy-secret-for-0.5-fixture", phc).await);
+        assert!(!verify_secret("wrong", phc).await);
     }
 
     #[tokio::test]

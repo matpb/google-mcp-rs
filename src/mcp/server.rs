@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use http::request::Parts;
 use rmcp::handler::server::tool::ToolRouter;
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::model::{ServerCapabilities, ServerConfig};
 use rmcp::{ErrorData, ServerHandler, tool_handler};
 
 use crate::credentials::resolve_google;
@@ -514,8 +514,8 @@ fn file_handling_instructions(jail: Option<&FileJail>) -> String {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for GoogleMcp {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         let base = "Google Workspace MCP — Gmail + Sheets + Drive + Docs + Calendar + Tasks + \
              Contacts + Search Console. \
@@ -555,7 +555,7 @@ impl ServerHandler for GoogleMcp {
         &self,
         request: rmcp::model::CallToolRequestParams,
         mut context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+    ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
         if matches!(self.state.tenancy, Tenancy::Single(_))
             && context.extensions.get::<Parts>().is_none()
         {

@@ -515,7 +515,7 @@ fn build_router(state: AppState) -> Router {
     // simple: each request is independent.
     let mcp_state = state.clone();
     let mut mcp_config = StreamableHttpServerConfig::default();
-    mcp_config.stateful_mode = false;
+    mcp_config.legacy_session_mode = false;
     mcp_config.json_response = true;
     mcp_config = mcp_config.with_allowed_hosts(allowed_hosts);
     let mcp_service = StreamableHttpService::new(

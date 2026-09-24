@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Dependencies: `rmcp` 3.4 (MCP SDK), `aes-gcm` 0.11 and `argon2` 0.6. Stored
+  refresh tokens and existing client secrets keep working unchanged.
+
 ## [1.0.0] - 2026-09-23
 
 First stable release. No tool-surface changes since 0.12.0 (still 113 domain
