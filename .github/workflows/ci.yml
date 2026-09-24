@@ -50,3 +50,11 @@ jobs:
           cache-targets: false
       - run: cargo install cargo-audit --locked
       - run: cargo audit
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker build -t google-mcp-ci .
+      - run: test "$(docker run --rm google-mcp-ci --version)" = "google-mcp $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+      - run: test "$(docker image inspect google-mcp-ci --format '{{.Config.User}}')" = "65532:65532"
