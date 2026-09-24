@@ -7,10 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-23
+
 ### Changed
 
 - Dependencies: `rmcp` 3.4 (MCP SDK), `aes-gcm` 0.11 and `argon2` 0.6. Stored
   refresh tokens and existing client secrets keep working unchanged.
+- Docker base images are pinned by tag and digest, so updates stay on the
+  Alpine builder and the non-root distroless runtime. CI now builds the image
+  and checks that it runs as a non-root user.
 
 ## [1.0.0] - 2026-09-23
 
