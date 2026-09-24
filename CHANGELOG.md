@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The HTTP server now shuts down gracefully on SIGTERM (what `docker stop`
+  and systemd send), instead of being killed after the stop timeout.
+
 ## [1.0.1] - 2026-09-23
 
 ### Changed

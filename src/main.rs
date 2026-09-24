@@ -274,7 +274,19 @@ async fn run_http() {
     let listener = TcpListener::bind(addr).await.unwrap();
     tracing::info!("google-mcp listening on http://{addr}");
 
+    // SIGTERM too: it is what `docker stop` and systemd send, and PID 1 ignores it by default.
     let shutdown = async {
+        #[cfg(unix)]
+        {
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
         tokio::signal::ctrl_c().await.ok();
         tracing::info!("shutting down");
     };
