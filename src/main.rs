@@ -40,8 +40,9 @@ use state::{AppState, Tenancy};
 use storage::{Db, accounts, clients, codes::sweep_expired};
 use tower_http::cors::AllowOrigin;
 
-const USAGE: &str =
-    "usage: google-mcp [http|stdio|auth|accounts list|accounts revoke <email-or-sub>|version|help]";
+const USAGE: &str = "usage: google-mcp [http|stdio|auth|accounts list|accounts revoke <email-or-sub>|version|help]\n\
+     env: http and accounts load ./.env; stdio and auth do not (an MCP client's cwd is arbitrary).\n\
+     Set GOOGLE_MCP_ENV_FILE=/abs/path to load a specific file in any mode instead.";
 
 #[tokio::main]
 async fn main() {
@@ -81,6 +82,57 @@ fn init_tracing(to_stderr: bool) {
     }
 }
 
+/// Which subcommand is running, for the env-loading decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Http,
+    Stdio,
+    Auth,
+    Accounts,
+}
+
+/// What `load_env_files` should do, decided without touching the filesystem or process env.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EnvLoadPlan {
+    /// Neither `./.env` nor an override file.
+    None,
+    /// The process's `./.env`.
+    Dotenv,
+    /// `GOOGLE_MCP_ENV_FILE`, which overrides the mode's default.
+    File(PathBuf),
+}
+
+/// Pure decision: `stdio`/`auth` never read `./.env` (an MCP client's cwd is
+/// arbitrary), `http`/`accounts` do; `GOOGLE_MCP_ENV_FILE` overrides either.
+fn plan_env_load(mode: Mode, env_file_override: Option<&str>) -> EnvLoadPlan {
+    if let Some(path) = env_file_override {
+        return EnvLoadPlan::File(PathBuf::from(path));
+    }
+    match mode {
+        Mode::Stdio | Mode::Auth => EnvLoadPlan::None,
+        Mode::Http | Mode::Accounts => EnvLoadPlan::Dotenv,
+    }
+}
+
+/// Loads env file(s) for `mode`. Must run before `ensure_local_secrets` and
+/// `load_config`: dotenvy never overwrites an already-set variable.
+fn load_env_files(mode: Mode) -> Result<(), String> {
+    let override_path = optional_env("GOOGLE_MCP_ENV_FILE");
+    match plan_env_load(mode, override_path.as_deref()) {
+        EnvLoadPlan::None => Ok(()),
+        EnvLoadPlan::Dotenv => {
+            let _ = dotenvy::dotenv();
+            Ok(())
+        }
+        EnvLoadPlan::File(path) => dotenvy::from_path(&path).map_err(|e| {
+            format!(
+                "could not load GOOGLE_MCP_ENV_FILE at {}: {e}",
+                path.display()
+            )
+        }),
+    }
+}
+
 fn load_config() -> ServerConfig {
     match ServerConfig::from_env() {
         Ok(cfg) => cfg,
@@ -101,14 +153,55 @@ async fn open_database(cfg: &ServerConfig) -> Db {
     }
 }
 
+/// Outcome of resolving one secret from its env var and its keyfile line.
+#[derive(Debug)]
+struct ResolvedSecret {
+    value: String,
+    /// Whether the keyfile needs to be (re)written to hold this value.
+    write_needed: bool,
+}
+
+/// Per-secret policy: env+file agreeing or only one present -> use it; env+file
+/// disagreeing -> error; neither -> generate. `keyfile_path` is only for the error text.
+fn resolve_secret(
+    name: &str,
+    env: Option<&str>,
+    file: Option<&str>,
+    keyfile_path: &Path,
+    generate: impl FnOnce() -> String,
+) -> Result<ResolvedSecret, String> {
+    match (env, file) {
+        (Some(e), Some(f)) if e == f => Ok(ResolvedSecret {
+            value: e.to_string(),
+            write_needed: false,
+        }),
+        (Some(_), Some(_)) => Err(format!(
+            "{name} in the environment does not match the value stored in {}. Overwriting the \
+             keyfile would make existing stored tokens undecryptable. Unset {name}, or \
+             deliberately delete/move {} to rotate it.",
+            keyfile_path.display(),
+            keyfile_path.display()
+        )),
+        (Some(e), None) => Ok(ResolvedSecret {
+            value: e.to_string(),
+            write_needed: true,
+        }),
+        (None, Some(f)) => Ok(ResolvedSecret {
+            value: f.to_string(),
+            write_needed: false,
+        }),
+        (None, None) => Ok(ResolvedSecret {
+            value: generate(),
+            write_needed: true,
+        }),
+    }
+}
+
 /// Loads `JWT_SECRET` / `STORAGE_ENCRYPTION_KEY` from `<DATABASE_URL>.keys` when unset, generating the file on first run.
-/// Must run after `dotenvy::dotenv()`: dotenvy never overwrites a set variable, so a `.env` key would otherwise silently win.
+/// Must run after `load_env_files`: dotenvy never overwrites a set variable, so a `.env` key would otherwise silently win.
 fn ensure_local_secrets() -> Result<(), String> {
     let env_jwt = optional_env("JWT_SECRET");
     let env_key = optional_env("STORAGE_ENCRYPTION_KEY");
-    if env_jwt.is_some() && env_key.is_some() {
-        return Ok(());
-    }
 
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "./google-mcp.db".to_string());
     let keyfile = PathBuf::from(format!("{db_url}.keys"));
@@ -131,22 +224,25 @@ fn ensure_local_secrets() -> Result<(), String> {
         Err(e) => return Err(format!("could not read {}: {e}", keyfile.display())),
     }
 
-    // Prefer an env-supplied value even when persisting, so the keyfile and the
-    // running process never disagree about a secret.
-    let jwt = env_jwt
-        .clone()
-        .or(file_jwt.clone())
-        .unwrap_or_else(random_hex_64);
-    let key = env_key
-        .clone()
-        .or(file_key.clone())
-        .unwrap_or_else(random_storage_key);
+    let jwt = resolve_secret(
+        "JWT_SECRET",
+        env_jwt.as_deref(),
+        file_jwt.as_deref(),
+        &keyfile,
+        random_hex_64,
+    )?;
+    let key = resolve_secret(
+        "STORAGE_ENCRYPTION_KEY",
+        env_key.as_deref(),
+        file_key.as_deref(),
+        &keyfile,
+        random_storage_key,
+    )?;
 
-    // Only rewrite when the file does not already hold exactly these values.
-    // Rewriting on every launch would risk truncating a perfectly good keyfile,
-    // and losing STORAGE_ENCRYPTION_KEY makes every stored token undecryptable.
-    if file_jwt.as_deref() != Some(&jwt) || file_key.as_deref() != Some(&key) {
-        write_keyfile(&keyfile, &jwt, &key)?;
+    // Losing STORAGE_ENCRYPTION_KEY makes every stored token undecryptable, so
+    // only rewrite when a resolved value actually needs persisting.
+    if jwt.write_needed || key.write_needed {
+        write_keyfile(&keyfile, &jwt.value, &key.value)?;
     }
 
     // SAFETY: `set_var` requires that no other thread concurrently reads or
@@ -156,10 +252,10 @@ fn ensure_local_secrets() -> Result<(), String> {
     #[allow(unsafe_code)]
     unsafe {
         if env_jwt.is_none() {
-            std::env::set_var("JWT_SECRET", &jwt);
+            std::env::set_var("JWT_SECRET", &jwt.value);
         }
         if env_key.is_none() {
-            std::env::set_var("STORAGE_ENCRYPTION_KEY", &key);
+            std::env::set_var("STORAGE_ENCRYPTION_KEY", &key.value);
         }
     }
     Ok(())
@@ -240,6 +336,10 @@ fn build_oauth_client(cfg: &ServerConfig, http: &Arc<reqwest::Client>) -> Google
 async fn run_http() {
     init_tracing(false);
 
+    if let Err(e) = load_env_files(Mode::Http) {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
     let cfg = load_config();
     tracing::info!(?cfg, "starting google-mcp (http)");
 
@@ -304,10 +404,10 @@ async fn run_http() {
 async fn run_stdio() {
     init_tracing(true); // stderr only — stdout is the MCP channel
 
-    // Load `.env` first: `ensure_local_secrets` injects into the process
-    // environment, and dotenvy will not overwrite an already-set variable, so
-    // provisioning before this would shadow a `.env`-supplied key.
-    let _ = dotenvy::dotenv();
+    if let Err(e) = load_env_files(Mode::Stdio) {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
     if let Err(e) = ensure_local_secrets() {
         eprintln!("{e}");
         std::process::exit(2);
@@ -373,10 +473,10 @@ async fn run_stdio() {
 async fn run_auth() {
     init_tracing(true);
 
-    // Load `.env` first: `ensure_local_secrets` injects into the process
-    // environment, and dotenvy will not overwrite an already-set variable, so
-    // provisioning before this would shadow a `.env`-supplied key.
-    let _ = dotenvy::dotenv();
+    if let Err(e) = load_env_files(Mode::Auth) {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
     if let Err(e) = ensure_local_secrets() {
         eprintln!("{e}");
         std::process::exit(2);
@@ -414,7 +514,10 @@ async fn run_auth() {
 
 async fn run_accounts(args: Vec<String>) {
     init_tracing(true);
-    let _ = dotenvy::dotenv();
+    if let Err(e) = load_env_files(Mode::Accounts) {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
     if let Err(e) = ensure_local_secrets() {
         eprintln!("{e}");
         std::process::exit(2);
@@ -651,6 +754,92 @@ mod tests {
     use axum::body::Body;
     use http::{HeaderValue, Request};
     use tower::ServiceExt;
+
+    #[test]
+    fn plan_env_load_stdio_and_auth_skip_dotenv() {
+        assert_eq!(plan_env_load(Mode::Stdio, None), EnvLoadPlan::None);
+        assert_eq!(plan_env_load(Mode::Auth, None), EnvLoadPlan::None);
+    }
+
+    #[test]
+    fn plan_env_load_http_and_accounts_use_dotenv() {
+        assert_eq!(plan_env_load(Mode::Http, None), EnvLoadPlan::Dotenv);
+        assert_eq!(plan_env_load(Mode::Accounts, None), EnvLoadPlan::Dotenv);
+    }
+
+    #[test]
+    fn plan_env_load_override_wins_in_every_mode() {
+        for mode in [Mode::Http, Mode::Stdio, Mode::Auth, Mode::Accounts] {
+            assert_eq!(
+                plan_env_load(mode, Some("/tmp/custom.env")),
+                EnvLoadPlan::File(PathBuf::from("/tmp/custom.env"))
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_secret_env_and_file_agree_needs_no_write() {
+        let r = resolve_secret(
+            "X",
+            Some("v"),
+            Some("v"),
+            Path::new("/k"),
+            || unreachable!(),
+        )
+        .unwrap();
+        assert_eq!(r.value, "v");
+        assert!(!r.write_needed);
+    }
+
+    #[test]
+    fn resolve_secret_storage_key_mismatch_errors() {
+        let err = resolve_secret(
+            "STORAGE_ENCRYPTION_KEY",
+            Some("foreign"),
+            Some("real"),
+            Path::new("/db.sqlite.keys"),
+            || unreachable!(),
+        )
+        .unwrap_err();
+        assert!(err.contains("STORAGE_ENCRYPTION_KEY"));
+        assert!(err.contains("/db.sqlite.keys"));
+    }
+
+    #[test]
+    fn resolve_secret_jwt_secret_mismatch_errors() {
+        let err = resolve_secret(
+            "JWT_SECRET",
+            Some("foreign"),
+            Some("real"),
+            Path::new("/db.sqlite.keys"),
+            || unreachable!(),
+        )
+        .unwrap_err();
+        assert!(err.contains("JWT_SECRET"));
+        assert!(err.contains("/db.sqlite.keys"));
+    }
+
+    #[test]
+    fn resolve_secret_env_only_uses_env_and_writes() {
+        let r = resolve_secret("X", Some("v"), None, Path::new("/k"), || unreachable!()).unwrap();
+        assert_eq!(r.value, "v");
+        assert!(r.write_needed);
+    }
+
+    #[test]
+    fn resolve_secret_file_only_uses_file_no_write() {
+        let r = resolve_secret("X", None, Some("v"), Path::new("/k"), || unreachable!()).unwrap();
+        assert_eq!(r.value, "v");
+        assert!(!r.write_needed);
+    }
+
+    #[test]
+    fn resolve_secret_neither_generates_and_writes() {
+        let r =
+            resolve_secret("X", None, None, Path::new("/k"), || "generated".to_string()).unwrap();
+        assert_eq!(r.value, "generated");
+        assert!(r.write_needed);
+    }
 
     #[test]
     fn loopback_origin_accepted() {

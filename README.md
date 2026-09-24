@@ -4,7 +4,7 @@ A multi-tenant **Model Context Protocol** server for **Google Workspace**, writt
 
 It also runs in **single-tenant stdio mode** as a prebuilt binary that any local MCP client (Claude Code, Claude Desktop, Codex, Cursor) launches as a child process — no TLS certificate, no tunnel, no inbound network exposure.
 
-> **Status:** v1.0.1 — Gmail (28) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **113 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 114th tool, `google_authenticate`, handles in-chat sign-in.
+> **Status:** v1.0.2 — Gmail (28) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **113 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 114th tool, `google_authenticate`, handles in-chat sign-in.
 
 ## Why
 
@@ -149,6 +149,10 @@ This path is for a personal install on your own machine; see [Quick start — HT
 
 4. **Sign in once** — run `google-mcp auth` in a terminal with the same env vars, or ask the assistant to call the **`google_authenticate`** tool. A browser opens, you approve, and that is it. Port 8433 must be free during sign-in only.
 
+`stdio` and `auth` ignore `./.env` (an MCP client launches the binary with whatever directory you happen to have open, and that directory's `.env` has nothing to do with this server) — configure through your MCP client's `env` block as above, or point `GOOGLE_MCP_ENV_FILE` at a file.
+
+**Several Google accounts** over stdio: add one MCP entry per account, each with its own `DATABASE_URL` (e.g. `~/.local/share/google-mcp/work.db`, `~/.local/share/google-mcp/personal.db`) so each keeps its own token store and `<DATABASE_URL>.keys`.
+
 Your encrypted Google refresh token lives only on your machine (`~/.google-mcp.db`, the `DATABASE_URL` SQLite file). The macOS binary is signed and notarized with a Developer ID; the Linux binaries are fully static (musl) and run on any distribution; the Windows binary is unsigned, so SmartScreen may warn on first run: **More info → Run anyway**.
 
 ## Quick start — HTTP server (local development)
@@ -229,6 +233,7 @@ Every variable `ServerConfig::from_env()` reads, from `src/config.rs`:
 | `ALLOWED_GOOGLE_ACCOUNTS` | no | unrestricted | Comma-separated exact emails and/or `@domain` entries. A `@domain` entry matches Google's `hd` claim (Workspace domain), not an email suffix. Empty/unset = any Google account may connect |
 | `FILE_ROOT` | no | — (disabled) | Absolute path to the file-exchange directory, bind-mounted into the container at the same path. Enables attaching/uploading by `path` and saving downloads by `dest_path` instead of base64. Unset = base64-only. See [File handling](#file-handling-attachments-uploads-downloads) |
 | `FILE_MAINTENANCE_TOOLS` | no | `off` | Whether the directory-maintenance tools are exposed: `off` (neither), `info` (read-only `files_info`), or `full` (`files_info` + the deleting `files_cleanup`). Off by default, so no deletion/listing tool exists unless you opt in. Only meaningful when `FILE_ROOT` is set |
+| `GOOGLE_MCP_ENV_FILE` | no | — | Absolute path to an env file to load in *any* mode (`http`, `stdio`, `auth`, `accounts`), instead of `./.env`. Never overrides an already-set variable. Missing/unreadable file exits with code 2 |
 
 Not read by `ServerConfig`, but honored elsewhere:
 

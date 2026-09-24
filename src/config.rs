@@ -35,9 +35,8 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
-        // Optional .env loading; ignore failure (env vars may be set directly).
-        let _ = dotenvy::dotenv();
-
+        // Env file loading is the caller's job (see `load_env_files` in main.rs):
+        // which file(s), if any, depends on the subcommand.
         let host = required("MCP_HOST")
             .unwrap_or_else(|_| "0.0.0.0".to_string())
             .parse::<IpAddr>()

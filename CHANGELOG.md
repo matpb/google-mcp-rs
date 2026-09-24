@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-23
+
+### Added
+
+- `GOOGLE_MCP_ENV_FILE`: an absolute path to an env file to load in any mode,
+  in place of `./.env`. Never overrides an already-set variable; a missing or
+  unreadable file exits with code 2.
+
+### Security
+
+- `stdio` and `auth` no longer load `./.env`. An MCP client launches the
+  binary with its own project's directory as cwd, so an unrelated project's
+  `.env` could silently supply this server's `GOOGLE_CLIENT_ID`,
+  `DATABASE_URL`, `JWT_SECRET`, `STORAGE_ENCRYPTION_KEY` or `FILE_ROOT`.
+  Configure `stdio`/`auth` through the MCP client's own `env` block, or set
+  `GOOGLE_MCP_ENV_FILE`. `http` and `accounts` are unaffected.
+- In `stdio`/`auth` mode the server now refuses to start, instead of silently rewriting
+  `<DATABASE_URL>.keys`, when an env-supplied `JWT_SECRET` or
+  `STORAGE_ENCRYPTION_KEY` disagrees with the value already on disk.
+  Overwriting `STORAGE_ENCRYPTION_KEY` in place would make every already
+  stored refresh token permanently undecryptable.
+
 ### Fixed
 
 - The HTTP server now shuts down gracefully on SIGTERM (what `docker stop`
