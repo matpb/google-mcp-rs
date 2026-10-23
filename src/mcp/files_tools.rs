@@ -22,6 +22,7 @@ const DEFAULT_LISTING_LIMIT: usize = 100;
 impl GoogleMcp {
     #[tool(
         name = "files_info",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Report the state of the file-exchange directory (FILE_ROOT): its path, the number of files, total bytes, and a listing (oldest first, so stale files surface). Use this to discover where to stage files for attachment/upload, and to see what has accumulated before calling files_cleanup. Files in the reserved `keep/` subdirectory are excluded."
     )]
     async fn files_info(
@@ -67,6 +68,11 @@ impl GoogleMcp {
 impl GoogleMcp {
     #[tool(
         name = "files_cleanup",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Tidy the file-exchange directory (FILE_ROOT). SAFE BY DEFAULT: dry_run is true unless you set it false, so by default this only REPORTS what would be deleted. Narrow the selection with `older_than_hours` and/or `name_contains`; with neither, it selects every file. Only regular files inside FILE_ROOT are eligible; the reserved `keep/` subdirectory is never touched. Set `dry_run=false` to actually delete."
     )]
     async fn files_cleanup(

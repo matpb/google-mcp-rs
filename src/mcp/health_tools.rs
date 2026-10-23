@@ -22,6 +22,7 @@ use crate::oauth::GoogleOAuthError;
 impl GoogleMcp {
     #[tool(
         name = "health_list_data_types",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "START HERE. No API call: returns the catalog of Google Health data types as `{ dataTypes: [{dataType, kind, payloadKey, operations}], filterHints: {kind: hint} }`. `dataType` is the hyphenated name every other health_* tool takes as `data_type`; `payloadKey` is the camelCase key holding the values inside a data point; `operations` says which tools work: list and reconcile -> health_list_data_points, get -> health_get_data_point, rollup -> health_rollup, dailyRollup -> health_daily_rollup. `kind` (interval, sample, daily, session, sleep, ecg, food) decides how `start`/`end` filters work. Units used by the API: distance in millimeters, weight in grams, durations as \"123s\", timestamps RFC3339 with a separate utc offset."
     )]
     async fn health_list_data_types(
@@ -33,6 +34,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "health_get_identity",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "The user's Google Health identity: `{ name, legacyUserId, healthUserId }`. `legacyUserId` is the old Fitbit user id."
     )]
     async fn health_get_identity(
@@ -50,6 +52,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "health_get_profile",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "The user's profile: `{ age, membershipStartDate (YYYY-MM-DD), userConfiguredWalkingStrideLengthMm, userConfiguredRunningStrideLengthMm }`. Stride lengths are in millimeters."
     )]
     async fn health_get_profile(
@@ -67,6 +70,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "health_get_settings",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "The user's Health settings: unit preferences (distance, height, weight, water, temperature, glucose, swim), `timeZone`, `utcOffset`, `languageLocale` and stride settings. Check the units and time zone here before interpreting local-time filters."
     )]
     async fn health_get_settings(
@@ -84,6 +88,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "health_get_irn_profile",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Irregular Rhythm Notifications (IRN) enrollment: `{ onboardingStatus, enrollmentStatus, updateTime }`. Use health_list_data_points with `irregular-rhythm-notification` for the notifications themselves."
     )]
     async fn health_get_irn_profile(
@@ -101,6 +106,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "health_list_paired_devices",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List paired wearables: `{ pairedDevices: [{name, deviceType, batteryStatus, batteryLevel, lastSyncTime, deviceVersion, features}], nextPageToken? }`. Use it to see battery, last sync time and firmware version. MAC addresses are omitted."
     )]
     async fn health_list_paired_devices(
@@ -118,6 +124,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "health_list_data_points",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List raw data points of one type, newest first: `{ dataType, dataPoints, nextPageToken?, dataSource? }` (`dataSource` is hoisted to the top when every point shares it). `data_type` must support list (or reconcile when `reconcile=true`); see health_list_data_types. Filter with `start` (inclusive) and `end` (exclusive): either LOCAL (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`, no zone, the user's own clock) or ABSOLUTE (RFC3339 with `Z` or an offset), and both bounds must be the same kind. Session types (exercise, hydration-log, nutrition-log, irregular-rhythm-notification) accept local bounds only; daily types take a date (a datetime is cut to its date); `electrocardiogram` takes an absolute `start` only; `food` types take no time bounds. Sleep is filtered by when it ENDS. Or pass a raw `filter` (verbatim, exclusive with start/end). `reconcile=true` merges all sources into one de-duplicated stream. `page_size` defaults to 200, but the API caps exercise and sleep at 25, and a sleep or exercise page can hold fewer points than `page_size`, even zero, while `nextPageToken` is set, so keep paging until it is absent. `page_size` is only a hint: the API ignores it for minute- or second-level types, so bound those reads by a time range instead. For heart-rate prefer health_rollup: it samples about once a second, so a day is thousands of points. Units: distance millimeters, weight grams, durations like \"123s\"."
     )]
     async fn health_list_data_points(
@@ -144,6 +151,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "health_get_data_point",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch one data point by id. `id` is the digits or a full name `users/<me|digits>/dataTypes/<type>/dataPoints/<digits>` whose type must equal `data_type`. Only types whose operations include get (blood-glucose, body-fat, core-body-temperature, weight, height, exercise, sleep, hydration-log, nutrition-log, food, food-measurement-unit). Returns the slimmed point."
     )]
     async fn health_get_data_point(
@@ -161,6 +169,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "health_rollup",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Aggregate a data type over fixed time windows: `{ dataType, rollupDataPoints: [{startTime, endTime, <payloadKey>: {...}}], nextPageToken? }`. `start` and `end` are ABSOLUTE RFC3339 with `Z` or an offset (end exclusive). `window` is the bucket size: `90s`, `15m`, `1h`, `1d` or bare seconds like `3600`, minimum 1 second. The API limits the range to 14 days for calories-in-heart-rate-zone, heart-rate, active-minutes and total-calories, and to 90 days for the rest. Only types whose operations include rollup. Best for heart-rate (for example 5-minute windows) instead of listing thousands of samples. For per-local-day totals use health_daily_rollup."
     )]
     async fn health_rollup(
@@ -186,6 +195,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "health_daily_rollup",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Per-day totals or averages in the user's local days: `{ dataType, rollupDataPoints: [{date, endDate, <payloadKey>: {...}}], nextPageToken? }`. `start_date` is inclusive and `end_date` exclusive, both `YYYY-MM-DD`; `window_days` (default 1) groups several days per bucket. The best tool for \"steps per day this month\" or \"average heart rate per day\". Range limits are the same as health_rollup (14 days for calories-in-heart-rate-zone, heart-rate, active-minutes and total-calories; 90 days for the rest). Only types whose operations include dailyRollup. Daily-kind types (daily-resting-heart-rate, daily-heart-rate-variability, ...) are already one value per day: read them with health_list_data_points, not this tool."
     )]
     async fn health_daily_rollup(
@@ -211,6 +221,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "health_export_exercise_tcx",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Export one exercise as a TCX file (GPS track, heart rate, laps) written to `dest_path` inside FILE_ROOT. Returns `{ path, sizeBytes }`; the XML never enters the context. `exercise_id` is the digits or full name of an exercise data point (find it with health_list_data_points `exercise`). `partial_data` (default true) includes points without GPS. Needs the activity and location scopes."
     )]
     async fn health_export_exercise_tcx(

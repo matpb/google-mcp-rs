@@ -25,6 +25,7 @@ const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
 impl GoogleMcp {
     #[tool(
         name = "drive_list_files",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List/search Drive files using Drive's query syntax (https://developers.google.com/drive/api/guides/search-files). E.g. `name contains 'invoice' and mimeType = 'application/pdf' and trashed = false`. Returns `{ nextPageToken, files: [...] }`."
     )]
     async fn drive_list_files(
@@ -50,6 +51,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_get_file",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch a Drive file's metadata. Default `fields` returns id, name, mimeType, parents, owners, timestamps, size, links, trashed status. Pass `supports_all_drives=true` for files that live in a Shared Drive."
     )]
     async fn drive_get_file(
@@ -67,6 +69,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_create_folder",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a new folder. `parent_id` nests it inside another folder; omit for the root."
     )]
     async fn drive_create_folder(
@@ -94,6 +101,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_create_file",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Upload a new file to Drive. Content comes from `path` (preferred — a file inside the server's FILE_ROOT exchange dir) OR `data_base64` (fallback). `mime_type` is inferred from the name/path when omitted. Multipart upload — Google recommends this path for files under ~5 MB; this server hard-caps decoded content at 256 MiB and rejects anything larger, so use a follow-up resumable-upload tool (not yet wired) for bigger files."
     )]
     async fn drive_create_file(
@@ -130,6 +142,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_update_metadata",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Rename, re-describe, move (via add_parents/remove_parents), or star a file. Pass only the fields you want to change."
     )]
     async fn drive_update_metadata(
@@ -162,6 +179,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_update_content",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Replace a file's binary content. `mime_type` must match (or convert sensibly to) the file's stored type."
     )]
     async fn drive_update_content(
@@ -188,6 +210,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_download_file",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Download a file's binary bytes. Preferred: set `dest_path` (inside FILE_ROOT) to write the bytes to disk and get `{ path, sizeBytes, contentType }` back — nothing enters the model's context. Without `dest_path`, returns `{ contentType, sizeBytes, data: <base64 std> }` (capped when a file-exchange dir is available). For Google Docs/Sheets/Slides, use `drive_export_file` instead — they have no native bytes."
     )]
     async fn drive_download_file(
@@ -210,6 +237,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_export_file",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Export a Google Doc/Sheet/Slide to a downloadable format (e.g. `application/pdf`, `text/csv`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `text/markdown`). Returns base64-encoded bytes."
     )]
     async fn drive_export_file(
@@ -232,6 +264,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_copy_file",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Duplicate a file. Optional `name` and `parent_id` for the copy."
     )]
     async fn drive_copy_file(
@@ -256,6 +293,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_trash_file",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Move a file to Trash (reversible from Drive's UI for ~30 days)."
     )]
     async fn drive_trash_file(
@@ -273,6 +315,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_delete_permanent",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Permanently delete a file. NOT reversible. Prefer `drive_trash_file` unless you really mean it."
     )]
     async fn drive_delete_permanent(
@@ -290,6 +337,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_share_file",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        ),
         description = "Share a file by adding a permission. Required: `role` (`reader`/`commenter`/`writer`/`fileOrganizer`/`organizer`/`owner`) and `type` (`user`/`group`/`domain`/`anyone`). For user/group, also pass `email_address`. For domain, pass `domain`. By default a notification email goes out."
     )]
     async fn drive_share_file(
@@ -323,6 +375,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_list_permissions",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List all permissions (sharing entries) on a file."
     )]
     async fn drive_list_permissions(
@@ -340,6 +393,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "drive_delete_permission",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Remove a sharing permission from a file by `permission_id` (get IDs from `drive_list_permissions`)."
     )]
     async fn drive_delete_permission(
