@@ -4,13 +4,14 @@ A multi-tenant **Model Context Protocol** server for **Google Workspace**, writt
 
 It also runs in **single-tenant stdio mode** as a prebuilt binary that any local MCP client (Claude Code, Claude Desktop, Codex, Cursor) launches as a child process — no TLS certificate, no tunnel, no inbound network exposure.
 
-> **Status:** v1.0.2 — Gmail (28) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **113 tools** total, plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 114th tool, `google_authenticate`, handles in-chat sign-in.
+> **Status:** v1.1.0. Gmail (28) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **113 tools** by default, plus an opt-in, read-only **Google Health** domain (11 tools, 124 in total with it; see [Health](#health-11)), plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 114th tool, `google_authenticate`, handles in-chat sign-in.
 
 ## Why
 
 The first-party Google Workspace MCP server is missing fundamentals (you cannot send an email from it). Existing community servers are Python or single-tenant. `google-mcp-rs` aims to be the Rust server you actually want to deploy:
 
 - **Full Gmail / Sheets / Drive / Docs / Calendar / Tasks / Contacts / Search Console surface** — 113 tools covering email (search/threads/drafts/send/labels/filters/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence), Google Tasks (task lists + tasks CRUD, subtasks, reordering, completion, cross-list moves), Google Contacts (contact CRUD, prefix search, contact groups/labels and their membership), and Google Search Console (properties, sitemaps, search analytics, URL inspection).
+- **Opt-in Google Health (Fitbit data), read-only**: 11 tools over the Google Health API v4beta: steps, heart rate, sleep, HRV, SpO2, exercise (with TCX export), weight and more, with raw reads, reconciled streams and windowed or per-day rollups. Not in the default set: enable it with `ENABLED_DOMAINS=default,health`.
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256, a consent screen, and per-account revocation.
 - **Two transports, one binary** — **streamable HTTP** (multi-tenant: one running instance serves many MCP clients and many Google accounts at once), or **stdio** (single-tenant: your MCP client launches it as a local child process, no TLS and nothing on the network). See [Quick start — prebuilt binary (stdio)](#quick-start--prebuilt-binary-stdio).
@@ -162,7 +163,7 @@ Your encrypted Google refresh token lives only on your machine (`~/.google-mcp.d
 In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
 
 1. Pick or create a GCP project.
-2. Enable the **Gmail API**, **Sheets API**, **Drive API**, **Docs API**, **Calendar API**, **Tasks API**, **People API**, and **Search Console API**.
+2. Enable the **Gmail API**, **Sheets API**, **Drive API**, **Docs API**, **Calendar API**, **Tasks API**, **People API**, and **Search Console API**. For the opt-in Health domain also enable the **Google Health API**.
 3. **OAuth consent screen** → External, app name `google-mcp` (or whatever you want users to see), user support email, developer email.
 4. Add scopes:
    - `openid`
@@ -176,6 +177,16 @@ In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
    - `https://www.googleapis.com/auth/tasks`
    - `https://www.googleapis.com/auth/contacts`
    - `https://www.googleapis.com/auth/webmasters`
+   - Only for the opt-in `health` domain (all read-only):
+     - `https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly`
+     - `https://www.googleapis.com/auth/googlehealth.sleep.readonly`
+     - `https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly`
+     - `https://www.googleapis.com/auth/googlehealth.nutrition.readonly`
+     - `https://www.googleapis.com/auth/googlehealth.ecg.readonly`
+     - `https://www.googleapis.com/auth/googlehealth.irn.readonly`
+     - `https://www.googleapis.com/auth/googlehealth.profile.readonly`
+     - `https://www.googleapis.com/auth/googlehealth.settings.readonly`
+     - `https://www.googleapis.com/auth/googlehealth.location.readonly`
 5. Add yourself + any beta users to the **Test users** list (until the app is verified, only test users can authorize — see [Caveats](#caveats)).
 6. **Credentials** → **Create credentials** → **OAuth 2.0 Client ID** → **Web application**.
 7. Authorized redirect URI: `${BASE_URL}/oauth/google/callback` (e.g. `http://localhost:8433/oauth/google/callback` for dev).
@@ -229,7 +240,7 @@ Every variable `ServerConfig::from_env()` reads, from `src/config.rs`:
 | `DATABASE_URL` | no | `./google-mcp.db` | SQLite file path (or `:memory:` in tests) |
 | `CORS_ALLOW_LOCALHOST` | no | `false` | Allow any loopback origin (`localhost`/`127.0.0.1`/`::1`, any scheme/port) in CORS. Dev only — production always allows only `https://claude.ai` and `https://claude.com` regardless of this setting |
 | `ALLOWED_HOSTS` | no | none | Comma-separated extra `Host`/`X-Forwarded-Host` entries allowed beyond loopback and `BASE_URL`'s own host — e.g. a tunnel or reverse-proxy hostname. Also extends the RFC 8707 `aud`/`resource` allowlist |
-| `ENABLED_DOMAINS` | no | all eight | Comma-separated subset of `gmail,sheets,drive,docs,calendar,tasks,people,searchconsole` (`contacts` aliases `people`; `search_console`/`search-console`/`webmasters` alias `searchconsole`). Filters both the MCP tool surface and the OAuth scopes requested from Google. See [Scoping the surface](#scoping-the-surface) |
+| `ENABLED_DOMAINS` | no | all eight (Health not included) | Comma-separated subset of `gmail,sheets,drive,docs,calendar,tasks,people,searchconsole,health` (`contacts` aliases `people`; `search_console`/`search-console`/`webmasters` alias `searchconsole`; `fitbit` aliases `health`). The token `default` expands to the eight standard domains in place, so `default,health` adds the opt-in Health domain. Filters both the MCP tool surface and the OAuth scopes requested from Google. See [Scoping the surface](#scoping-the-surface) |
 | `ALLOWED_GOOGLE_ACCOUNTS` | no | unrestricted | Comma-separated exact emails and/or `@domain` entries. A `@domain` entry matches Google's `hd` claim (Workspace domain), not an email suffix. Empty/unset = any Google account may connect |
 | `FILE_ROOT` | no | — (disabled) | Absolute path to the file-exchange directory, bind-mounted into the container at the same path. Enables attaching/uploading by `path` and saving downloads by `dest_path` instead of base64. Unset = base64-only. See [File handling](#file-handling-attachments-uploads-downloads) |
 | `FILE_MAINTENANCE_TOOLS` | no | `off` | Whether the directory-maintenance tools are exposed: `off` (neither), `info` (read-only `files_info`), or `full` (`files_info` + the deleting `files_cleanup`). Off by default, so no deletion/listing tool exists unless you opt in. Only meaningful when `FILE_ROOT` is set |
@@ -243,7 +254,7 @@ Not read by `ServerConfig`, but honored elsewhere:
 
 ## Scoping the surface
 
-By default, the server exposes all 113 tools across all eight Workspace domains and asks Google for the matching scope set during consent. For deployments that only need part of the surface, set `ENABLED_DOMAINS` to a comma-separated subset:
+By default, the server exposes all 113 tools across the eight standard Workspace domains and asks Google for the matching scope set during consent. For deployments that only need part of the surface, set `ENABLED_DOMAINS` to a comma-separated subset:
 
 ```bash
 ENABLED_DOMAINS=gmail            # Gmail-only: 28 tools, gmail.modify + gmail.settings.basic scopes
@@ -252,6 +263,8 @@ ENABLED_DOMAINS=docs,drive       # document workflow: 26 tools
 ENABLED_DOMAINS=calendar,tasks   # planning only: 27 tools
 ENABLED_DOMAINS=gmail,people     # email + address book: 41 tools
 ENABLED_DOMAINS=searchconsole   # SEO only: 8 tools, webmasters scope
+ENABLED_DOMAINS=default,health  # the standard eight plus Google Health: 124 tools, 9 extra read-only googlehealth.* scopes
+ENABLED_DOMAINS=health          # Health only: 11 tools
 ```
 
 Two things shrink in lockstep:
@@ -259,7 +272,7 @@ Two things shrink in lockstep:
 1. **Tool surface.** Only the listed domains' `tool_router` impls compose into the MCP server. The rest of the tools simply do not exist on this instance — they don't show up in `tools/list`, they don't burn agent context tokens, they can't be called.
 2. **OAuth scopes.** The consent screen asks Google for `openid`, `email`, plus only the scopes for the listed domains. A user authorizing a Gmail-only deployment never grants the server access to their Drive or Calendar.
 
-Domain names are case-insensitive and whitespace-trimmed (`Gmail`, `GMAIL`, `gmail ` all parse the same). Unset, empty, or `ENABLED_DOMAINS=` reverts to the full surface (backwards-compatible default). An unknown domain name fails fast at startup with the valid list in the error message.
+Domain names are case-insensitive and whitespace-trimmed (`Gmail`, `GMAIL`, `gmail ` all parse the same). Unset, empty, or `ENABLED_DOMAINS=` reverts to the standard eight domains (backwards-compatible default). Google Health is opt-in and never part of that default: name it, or write `default,health`. Turning it on adds its 9 read-only scopes, so existing users must re-consent. An unknown domain name fails fast at startup with the valid list in the error message.
 
 ## File handling (attachments, uploads, downloads)
 
@@ -512,6 +525,32 @@ setfacl -m u:65532:rwx ~/Downloads
 | `searchconsole_inspect_url` | URL Inspection: index verdict, coverage, last crawl, canonical, rich results for one URL |
 
 > **Property spelling matters.** A Domain property is `sc-domain:example.com`; a URL-prefix property is `https://example.com/` with the trailing slash. Copy `siteUrl` from `searchconsole_list_sites` verbatim. Search analytics dates are `YYYY-MM-DD` in Pacific time and the last two or three days are excluded until `data_state=all` is passed.
+
+### Health (11)
+
+Opt-in and read-only: not in the default set, enable it with `ENABLED_DOMAINS=default,health` (or `health` alone). Talks to the Google Health API v4beta, the successor of the Fitbit Web API, and needs the **Google Health API** enabled in your GCP project plus the nine `googlehealth.*.readonly` scopes.
+
+| Tool | Purpose |
+|---|---|
+| `health_list_data_types` | No API call. The catalog of 41 data types with their kind and supported operations, plus a filter hint per kind. Start here |
+| `health_get_identity` | The user's Health identity (`healthUserId`, legacy Fitbit id) |
+| `health_get_profile` | Age, membership start date, configured stride lengths (mm) |
+| `health_get_settings` | Unit preferences, time zone and UTC offset, locale |
+| `health_get_irn_profile` | Irregular Rhythm Notifications onboarding and enrollment status |
+| `health_list_paired_devices` | Paired wearables with battery, last sync time and firmware (MAC address omitted) |
+| `health_list_data_points` | Raw data points of one type, newest first. Filter with `start`/`end` (local or absolute) or a raw `filter`; `reconcile=true` merges sources into one de-duplicated stream; `data_source_family` narrows the sources; paged |
+| `health_get_data_point` | One data point by id or full name, for the types that support get |
+| `health_rollup` | Aggregate over fixed windows (`90s`, `15m`, `1h`, `1d`) between two absolute timestamps. The practical way to read heart rate |
+| `health_daily_rollup` | Per-local-day totals or averages between two dates, with an optional multi-day window |
+| `health_export_exercise_tcx` | Write one exercise as a TCX file inside `FILE_ROOT`; returns `{path, sizeBytes}` |
+
+The Health API rejects any token that carries other scopes, so the server mints a health-only token from the stored refresh token automatically; if the account never granted the Health scopes, the tools say to sign in again with the domain enabled.
+
+> **Local versus absolute bounds.** `start`/`end` are either local (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`, no zone, the user's own clock) or absolute (RFC3339 with `Z` or an offset), and both bounds must be the same kind. `start` is inclusive, `end` exclusive. Session types (exercise, hydration-log, nutrition-log, irregular-rhythm-notification) accept local bounds only, daily types take a date, `electrocardiogram` takes an absolute `start` only, `food` types take no time bounds, and sleep is filtered by when it ends.
+
+> **Paging can return short pages.** A sleep or exercise page can hold fewer points than `page_size`, even zero, while `nextPageToken` is set: keep paging until it is absent. Rollups are limited to 14 days for calories-in-heart-rate-zone, heart-rate, active-minutes and total-calories, and to 90 days for the other types.
+
+> **Units.** Distance is in millimeters, weight in grams and durations look like `"123s"`. Output is slimmed: civil-time duplicates and create/update times are dropped, dates are `YYYY-MM-DD`, and an identical `dataSource` is reported once at the top of a page.
 
 ## Error contract
 

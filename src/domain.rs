@@ -1,5 +1,5 @@
-//! Workspace domains. `ENABLED_DOMAINS` picks which tool surfaces load and
-//! which OAuth scopes are requested; unset or empty means all eight.
+//! Workspace domains. `ENABLED_DOMAINS` picks the tool surfaces and OAuth scopes;
+//! unset means the default eight, and Health is opt-in (`default,health`).
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -14,6 +14,7 @@ pub enum Domain {
     Tasks,
     People,
     SearchConsole,
+    Health,
 }
 
 impl Domain {
@@ -28,6 +29,10 @@ impl Domain {
         Domain::SearchConsole,
     ];
 
+    /// Domains that load only when named in `ENABLED_DOMAINS`.
+    #[cfg(test)]
+    pub const OPT_IN: [Domain; 1] = [Domain::Health];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Domain::Gmail => "gmail",
@@ -38,6 +43,7 @@ impl Domain {
             Domain::Tasks => "tasks",
             Domain::People => "people",
             Domain::SearchConsole => "searchconsole",
+            Domain::Health => "health",
         }
     }
 
@@ -52,6 +58,7 @@ impl Domain {
             Domain::Tasks => "Google Tasks",
             Domain::People => "Contacts",
             Domain::SearchConsole => "Search Console",
+            Domain::Health => "Google Health",
         }
     }
 
@@ -69,6 +76,17 @@ impl Domain {
             Domain::Tasks => &["https://www.googleapis.com/auth/tasks"],
             Domain::People => &["https://www.googleapis.com/auth/contacts"],
             Domain::SearchConsole => &["https://www.googleapis.com/auth/webmasters"],
+            Domain::Health => &[
+                "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+                "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
+                "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
+                "https://www.googleapis.com/auth/googlehealth.nutrition.readonly",
+                "https://www.googleapis.com/auth/googlehealth.ecg.readonly",
+                "https://www.googleapis.com/auth/googlehealth.irn.readonly",
+                "https://www.googleapis.com/auth/googlehealth.profile.readonly",
+                "https://www.googleapis.com/auth/googlehealth.settings.readonly",
+                "https://www.googleapis.com/auth/googlehealth.location.readonly",
+            ],
         }
     }
 }
@@ -93,17 +111,16 @@ impl FromStr for Domain {
             "searchconsole" | "search_console" | "search-console" | "webmasters" => {
                 Ok(Domain::SearchConsole)
             }
+            "health" | "fitbit" => Ok(Domain::Health),
             other => Err(format!(
-                "unknown domain '{other}': expected one of gmail, sheets, drive, docs, calendar, tasks, people, searchconsole"
+                "unknown domain '{other}': expected one of gmail, sheets, drive, docs, calendar, tasks, people, searchconsole, health"
             )),
         }
     }
 }
 
-/// Parse an `ENABLED_DOMAINS` env-var value (comma-separated,
-/// case-insensitive, whitespace-trimmed). Empty or missing input
-/// returns `Domain::ALL`. Duplicates are deduplicated; first occurrence
-/// wins for ordering.
+/// Parse an `ENABLED_DOMAINS` value (comma-separated, case-insensitive). Empty
+/// input is `Domain::ALL`; `default` expands to it in place. First occurrence wins.
 pub fn parse_enabled(raw: Option<&str>) -> Result<Vec<Domain>, String> {
     let trimmed = raw.map(str::trim).filter(|s| !s.is_empty());
     let Some(s) = trimmed else {
@@ -116,7 +133,17 @@ pub fn parse_enabled(raw: Option<&str>) -> Result<Vec<Domain>, String> {
         if piece.is_empty() {
             continue;
         }
-        let d: Domain = piece.parse()?;
+        if piece.eq_ignore_ascii_case("default") {
+            for d in Domain::ALL {
+                if seen.insert(d) {
+                    out.push(d);
+                }
+            }
+            continue;
+        }
+        let d: Domain = piece
+            .parse()
+            .map_err(|e| format!("{e} (or `default` for the standard eight)"))?;
         if seen.insert(d) {
             out.push(d);
         }
@@ -239,7 +266,7 @@ mod tests {
 
     #[test]
     fn google_scopes_for_each_single_domain() {
-        for d in Domain::ALL {
+        for d in Domain::ALL.into_iter().chain(Domain::OPT_IN) {
             let s = google_scopes(&[d]);
             assert_eq!(
                 s.len(),
@@ -256,10 +283,62 @@ mod tests {
 
     #[test]
     fn as_str_round_trips_through_parse() {
-        for d in Domain::ALL {
+        for d in Domain::ALL.into_iter().chain(Domain::OPT_IN) {
             let parsed: Domain = d.as_str().parse().unwrap();
             assert_eq!(parsed, d, "{d} should round-trip through as_str/parse");
         }
+    }
+
+    #[test]
+    fn health_and_fitbit_parse_and_are_opt_in() {
+        assert_eq!(parse_enabled(Some("health")).unwrap(), vec![Domain::Health]);
+        assert_eq!(parse_enabled(Some("Fitbit")).unwrap(), vec![Domain::Health]);
+        assert!(!Domain::ALL.contains(&Domain::Health));
+        assert!(!parse_enabled(None).unwrap().contains(&Domain::Health));
+        assert_eq!(Domain::OPT_IN, [Domain::Health]);
+        assert_eq!(Domain::Health.human_name(), "Google Health");
+    }
+
+    #[test]
+    fn default_token_expands_in_place() {
+        let mut want = Domain::ALL.to_vec();
+        want.push(Domain::Health);
+        assert_eq!(parse_enabled(Some("default,health")).unwrap(), want);
+        assert_eq!(parse_enabled(Some(" DEFAULT , health ")).unwrap(), want);
+        assert_eq!(
+            parse_enabled(Some("default")).unwrap(),
+            Domain::ALL.to_vec()
+        );
+        assert_eq!(
+            parse_enabled(Some("health,default,gmail")).unwrap()[..2],
+            [Domain::Health, Domain::Gmail]
+        );
+    }
+
+    #[test]
+    fn health_scopes_are_exactly_the_nine_readonly() {
+        let base = "https://www.googleapis.com/auth/googlehealth.";
+        let want: Vec<String> = [
+            "activity_and_fitness",
+            "sleep",
+            "health_metrics_and_measurements",
+            "nutrition",
+            "ecg",
+            "irn",
+            "profile",
+            "settings",
+            "location",
+        ]
+        .iter()
+        .map(|n| format!("{base}{n}.readonly"))
+        .collect();
+        let got: Vec<String> = Domain::Health
+            .google_scopes()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(got, want);
+        assert_eq!(google_scopes(&[Domain::Health]).len(), 11);
     }
 
     #[test]
@@ -291,6 +370,7 @@ mod tests {
         let err = parse_enabled(Some("gmail,bogus")).unwrap_err();
         assert!(err.contains("bogus"));
         assert!(err.contains("expected one of"));
+        assert!(err.contains("health") && err.contains("default"));
     }
 
     #[test]

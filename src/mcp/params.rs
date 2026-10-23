@@ -1286,6 +1286,108 @@ fn default_tasklist() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
+
+/// Body-less params for the Health tools that take no input.
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct HealthNoParams {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HealthPairedDevicesParams {
+    /// Page size.
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HealthListDataPointsParams {
+    /// Data type, hyphenated (for example `steps`, `heart-rate`, `sleep`).
+    /// See `health_list_data_types`.
+    pub data_type: String,
+    /// Inclusive lower bound. Local `YYYY-MM-DD` / `YYYY-MM-DDTHH:MM:SS`
+    /// (no zone) or RFC3339 with `Z` or an offset. Not with `filter`.
+    #[serde(default)]
+    pub start: Option<String>,
+    /// Exclusive upper bound, same format and kind as `start`. Not with `filter`.
+    #[serde(default)]
+    pub end: Option<String>,
+    /// Raw Health API filter, sent verbatim. Exclusive with `start` / `end`.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// `all-sources`, `google-wearables`, `google-sources` or `self-sources`.
+    #[serde(default)]
+    pub data_source_family: Option<String>,
+    /// Page size. Default 200; the API caps exercise and sleep at 25.
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+    /// Call `:reconcile` to merge sources into one de-duplicated stream.
+    /// Default false.
+    #[serde(default)]
+    pub reconcile: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HealthGetDataPointParams {
+    /// Data type, hyphenated. Must support `get`.
+    pub data_type: String,
+    /// Digits, or a full name `users/<me|digits>/dataTypes/<type>/dataPoints/<digits>`.
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HealthRollupParams {
+    /// Data type, hyphenated. Must support `rollup`.
+    pub data_type: String,
+    /// Window start, RFC3339 with `Z` or an offset.
+    pub start: String,
+    /// Window end (exclusive), RFC3339 with `Z` or an offset.
+    pub end: String,
+    /// Bucket size: `90s`, `15m`, `1h`, `1d` or bare seconds like `3600`.
+    pub window: String,
+    #[serde(default)]
+    pub data_source_family: Option<String>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HealthDailyRollupParams {
+    /// Data type, hyphenated. Must support `dailyRollup`.
+    pub data_type: String,
+    /// First local day, `YYYY-MM-DD`.
+    pub start_date: String,
+    /// Last local day, `YYYY-MM-DD`, exclusive.
+    pub end_date: String,
+    /// Days per bucket. Default 1.
+    #[serde(default)]
+    pub window_days: Option<u32>,
+    #[serde(default)]
+    pub data_source_family: Option<String>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HealthExportTcxParams {
+    /// Exercise id (digits) or full name `users/<me|digits>/dataTypes/exercise/dataPoints/<digits>`.
+    pub exercise_id: String,
+    /// Destination path inside `FILE_ROOT` for the TCX file.
+    pub dest_path: String,
+    /// Include points without GPS. Default true.
+    #[serde(default = "default_true")]
+    pub partial_data: bool,
+}
+
+// ---------------------------------------------------------------------------
 // People (Contacts)
 // ---------------------------------------------------------------------------
 

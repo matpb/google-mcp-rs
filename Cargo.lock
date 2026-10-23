@@ -577,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "google-mcp"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "aes-gcm",
  "argon2",

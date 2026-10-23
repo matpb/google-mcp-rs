@@ -28,6 +28,7 @@ use crate::google::calendar::CalendarError;
 use crate::google::docs::DocsError;
 use crate::google::drive::DriveError;
 use crate::google::gmail::GmailError;
+use crate::google::health::HealthError;
 use crate::google::people::PeopleError;
 use crate::google::searchconsole::SearchConsoleError;
 use crate::google::session::SessionError;
@@ -747,6 +748,26 @@ impl From<TasksError> for McpError {
             }
             TasksError::InvalidId(s) => invalid_id_error("tasks", s),
             TasksError::TooLarge { cap, actual } => too_large_error("tasks", cap, actual),
+        }
+    }
+}
+
+impl From<HealthError> for McpError {
+    fn from(e: HealthError) -> Self {
+        match e {
+            HealthError::Http(err) => transient_from_reqwest("health", err),
+            HealthError::Api { status, message } => {
+                google_api_error("health", status.as_u16(), message, None)
+            }
+            HealthError::Parse(err) => {
+                McpError::internal(format!("could not parse Health response: {err}"))
+                    .with_service("health")
+            }
+            HealthError::InvalidId(s) => invalid_id_error("health", s),
+            HealthError::Invalid(s) => McpError::invalid_input(s)
+                .with_service("health")
+                .with_hint("Call health_list_data_types for valid data types, their kinds and supported operations."),
+            HealthError::TooLarge { cap, actual } => too_large_error("health", cap, actual),
         }
     }
 }

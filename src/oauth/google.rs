@@ -139,13 +139,34 @@ impl GoogleOAuthClient {
     /// is otherwise no longer usable; that is mapped to
     /// `GoogleOAuthError::InvalidGrant`.
     pub async fn refresh(&self, refresh_token: &str) -> Result<TokenGrant, GoogleOAuthError> {
-        let body = TokenRequest::Refresh {
+        let body = self.refresh_body(refresh_token, None);
+        self.post_token_request(&body).await
+    }
+
+    /// Like `refresh`, but mints a token carrying only `scopes` (a subset of
+    /// the granted set). An ungranted scope yields `invalid_scope`.
+    pub async fn refresh_scoped(
+        &self,
+        refresh_token: &str,
+        scopes: &[&str],
+    ) -> Result<TokenGrant, GoogleOAuthError> {
+        let joined = scopes.join(" ");
+        let body = self.refresh_body(refresh_token, Some(&joined));
+        self.post_token_request(&body).await
+    }
+
+    fn refresh_body<'a>(
+        &'a self,
+        refresh_token: &'a str,
+        scope: Option<&'a str>,
+    ) -> TokenRequest<'a> {
+        TokenRequest::Refresh {
             refresh_token,
             client_id: &self.client_id,
             client_secret: &self.client_secret,
             grant_type: "refresh_token",
-        };
-        self.post_token_request(&body).await
+            scope,
+        }
     }
 
     async fn post_token_request<T: Serialize + ?Sized>(
@@ -198,6 +219,8 @@ enum TokenRequest<'a> {
         client_id: &'a str,
         client_secret: &'a str,
         grant_type: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope: Option<&'a str>,
     },
 }
 
@@ -261,6 +284,28 @@ pub async fn revoke_token(http: &reqwest::Client, token: &str) -> Result<(), Goo
 mod tests {
     use super::*;
     use base64::Engine;
+
+    fn client() -> GoogleOAuthClient {
+        GoogleOAuthClient::new(
+            "cid",
+            "csecret",
+            "http://localhost/cb",
+            vec!["openid".into()],
+            reqwest::Client::new(),
+        )
+    }
+
+    #[test]
+    fn refresh_form_has_scope_only_when_given() {
+        let c = client();
+        let plain = serde_urlencoded::to_string(c.refresh_body("rt", None)).unwrap();
+        assert!(!plain.contains("scope"), "{plain}");
+        assert!(plain.contains("grant_type=refresh_token"), "{plain}");
+        let joined = ["a.readonly", "b.readonly"].join(" ");
+        let scoped = serde_urlencoded::to_string(c.refresh_body("rt", Some(&joined))).unwrap();
+        assert!(scoped.contains("scope=a.readonly+b.readonly"), "{scoped}");
+        assert!(scoped.contains("refresh_token=rt"), "{scoped}");
+    }
 
     fn fake_id_token_full(sub: &str, email: &str, iss: &str, aud: &str, exp: i64) -> String {
         let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"RS256\",\"typ\":\"JWT\"}");

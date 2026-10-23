@@ -1,9 +1,5 @@
-//! In-memory cache of live Google access tokens, with single-flight refresh.
-//!
-//! Each entry is keyed by Google `sub`. Access tokens are refreshed lazily:
-//! reads return the cached token if it's good for at least another 60s,
-//! otherwise the holder of the per-`sub` mutex calls Google's token
-//! endpoint, then everyone waiting picks up the fresh token.
+//! In-memory cache of Google access tokens keyed by `sub` (or `sub` + scope set for
+//! downscoped tokens), refreshed lazily under a per-key single-flight lock.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +38,19 @@ pub enum SessionError {
 }
 
 const REFRESH_LEEWAY_SECS: u64 = 60;
+/// Separates the sub from the scope set in a downscoped cache key (never in a Google `sub`).
+const KEY_SEP: char = '\u{0}';
+
+/// Cache key: the bare sub for the full-scope token, else sub + sorted scope set.
+fn cache_key(google_sub: &str, scopes: Option<&[&str]>) -> String {
+    let Some(scopes) = scopes else {
+        return google_sub.to_string();
+    };
+    let mut sorted: Vec<&str> = scopes.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    format!("{google_sub}{KEY_SEP}{}", sorted.join(" "))
+}
 
 #[derive(Clone)]
 struct CachedSession {
@@ -86,14 +95,33 @@ impl SessionCache {
 
     /// Resolve a live session for `google_sub`, refreshing transparently.
     pub async fn resolve(&self, google_sub: &str) -> Result<GoogleAccountSession, SessionError> {
-        if let Some(s) = self.read_fresh(google_sub).await {
+        self.resolve_inner(google_sub, None).await
+    }
+
+    /// Like `resolve`, but the token carries only `scopes`; cached per
+    /// (sub, scope set) apart from the full-scope token.
+    pub async fn resolve_scoped(
+        &self,
+        google_sub: &str,
+        scopes: &[&str],
+    ) -> Result<GoogleAccountSession, SessionError> {
+        self.resolve_inner(google_sub, Some(scopes)).await
+    }
+
+    async fn resolve_inner(
+        &self,
+        google_sub: &str,
+        scopes: Option<&[&str]>,
+    ) -> Result<GoogleAccountSession, SessionError> {
+        let key = cache_key(google_sub, scopes);
+        if let Some(s) = self.read_fresh(&key, google_sub).await {
             return Ok(s);
         }
-        let lock = self.refresh_lock_for(google_sub).await;
+        let lock = self.refresh_lock_for(&key).await;
         let _guard = lock.lock().await;
 
         // Another task may have refreshed while we waited.
-        if let Some(s) = self.read_fresh(google_sub).await {
+        if let Some(s) = self.read_fresh(&key, google_sub).await {
             return Ok(s);
         }
 
@@ -113,21 +141,27 @@ impl SessionCache {
             return Err(SessionError::AccountNotAllowed);
         }
 
-        match self.state.google.refresh(&refresh_token).await {
+        let refreshed = match scopes {
+            Some(sc) => self.state.google.refresh_scoped(&refresh_token, sc).await,
+            None => self.state.google.refresh(&refresh_token).await,
+        };
+        match refreshed {
             Ok(grant) => {
                 let now = now_secs();
-                let scopes: Vec<String> = grant
-                    .scope
-                    .as_deref()
-                    .map(|s| s.split_whitespace().map(str::to_string).collect())
-                    .unwrap_or(metadata.scopes.clone());
+                let fallback = match scopes {
+                    Some(sc) => sc.iter().map(ToString::to_string).collect(),
+                    None => metadata.scopes.clone(),
+                };
+                let scopes: Vec<String> = grant.scope.as_deref().map_or(fallback, |s| {
+                    s.split_whitespace().map(str::to_string).collect()
+                });
                 let cached = CachedSession {
                     access_token: grant.access_token.clone(),
                     expires_at: now + grant.expires_in,
                     email: metadata.email.clone(),
                     scopes: scopes.clone(),
                 };
-                self.write_cache(google_sub, cached).await;
+                self.write_cache(&key, cached).await;
                 let _ = accounts::touch_last_refresh(&self.state.db, google_sub).await;
                 Ok(GoogleAccountSession {
                     google_sub: google_sub.to_string(),
@@ -167,16 +201,22 @@ impl SessionCache {
             email: email.to_string(),
             scopes,
         };
-        self.write_cache(google_sub, cached).await;
+        self.write_cache(&cache_key(google_sub, None), cached).await;
     }
 
+    /// Drop the sub's full-scope entry and every downscoped entry.
     pub async fn invalidate(&self, google_sub: &str) {
-        self.state.cache.write().await.remove(google_sub);
+        let scoped_prefix = format!("{google_sub}{KEY_SEP}");
+        self.state
+            .cache
+            .write()
+            .await
+            .retain(|k, _| k != google_sub && !k.starts_with(&scoped_prefix));
     }
 
-    async fn read_fresh(&self, google_sub: &str) -> Option<GoogleAccountSession> {
+    async fn read_fresh(&self, key: &str, google_sub: &str) -> Option<GoogleAccountSession> {
         let map = self.state.cache.read().await;
-        let entry = map.get(google_sub)?;
+        let entry = map.get(key)?;
         if entry.expires_at > now_secs() + REFRESH_LEEWAY_SECS {
             Some(GoogleAccountSession {
                 google_sub: google_sub.to_string(),
@@ -190,19 +230,19 @@ impl SessionCache {
         }
     }
 
-    async fn write_cache(&self, google_sub: &str, entry: CachedSession) {
+    async fn write_cache(&self, key: &str, entry: CachedSession) {
         self.state
             .cache
             .write()
             .await
-            .insert(google_sub.to_string(), entry);
+            .insert(key.to_string(), entry);
     }
 
-    async fn refresh_lock_for(&self, google_sub: &str) -> Arc<Mutex<()>> {
+    async fn refresh_lock_for(&self, key: &str) -> Arc<Mutex<()>> {
         let mut locks = self.state.refresh_locks.lock().await;
         Arc::clone(
             locks
-                .entry(google_sub.to_string())
+                .entry(key.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
     }
@@ -320,5 +360,61 @@ mod tests {
         cache.invalidate("sub-1").await;
         let err = cache.resolve("sub-1").await.unwrap_err();
         assert!(matches!(err, SessionError::AccountNotAllowed));
+    }
+
+    fn entry(token: &str) -> CachedSession {
+        CachedSession {
+            access_token: token.into(),
+            expires_at: now_secs() + 3600,
+            email: "x@x.com".into(),
+            scopes: vec![],
+        }
+    }
+
+    #[test]
+    fn cache_key_ignores_scope_order_and_differs_from_plain() {
+        let a = cache_key("s", Some(&["b", "a"]));
+        assert_eq!(a, cache_key("s", Some(&["a", "b", "a"])));
+        assert_ne!(a, cache_key("s", None));
+        assert_ne!(a, cache_key("s", Some(&["a"])));
+        assert_eq!(cache_key("s", None), "s");
+    }
+
+    #[tokio::test]
+    async fn scoped_and_plain_tokens_are_cached_separately() {
+        let db = Db::open_in_memory().await.unwrap();
+        let cache = make_cache(db);
+        cache.write_cache("sub", entry("full")).await;
+        cache
+            .write_cache(&cache_key("sub", Some(&["h1", "h2"])), entry("health"))
+            .await;
+        assert_eq!(cache.resolve("sub").await.unwrap().access_token, "full");
+        let scoped = cache.resolve_scoped("sub", &["h2", "h1"]).await.unwrap();
+        assert_eq!(scoped.access_token, "health");
+        assert_eq!(scoped.google_sub, "sub");
+    }
+
+    #[tokio::test]
+    async fn invalidate_drops_scoped_entries_of_that_sub_only() {
+        let db = Db::open_in_memory().await.unwrap();
+        let cache = make_cache(db);
+        let key = cache_key("sub", Some(&["h1"]));
+        let other = cache_key("sub2", Some(&["h1"]));
+        cache.write_cache("sub", entry("full")).await;
+        cache.write_cache(&key, entry("health")).await;
+        cache.write_cache("sub2", entry("full2")).await;
+        cache.write_cache(&other, entry("health2")).await;
+        cache.invalidate("sub").await;
+        let map = cache.state.cache.read().await;
+        assert!(!map.contains_key("sub") && !map.contains_key(&key));
+        assert!(map.contains_key("sub2") && map.contains_key(&other));
+    }
+
+    #[tokio::test]
+    async fn resolve_scoped_unknown_sub_returns_account_not_found() {
+        let db = Db::open_in_memory().await.unwrap();
+        let cache = make_cache(db);
+        let err = cache.resolve_scoped("unknown", &["h1"]).await.unwrap_err();
+        assert!(matches!(err, SessionError::AccountNotFound));
     }
 }

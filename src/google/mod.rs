@@ -4,6 +4,7 @@ pub mod calendar;
 pub mod docs;
 pub mod drive;
 pub mod gmail;
+pub mod health;
 pub mod http;
 pub mod people;
 pub mod searchconsole;

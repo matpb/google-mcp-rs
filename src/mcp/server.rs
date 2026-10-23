@@ -68,6 +68,7 @@ impl GoogleMcp {
             Domain::Tasks => Self::tasks_router(),
             Domain::People => Self::people_router(),
             Domain::SearchConsole => Self::searchconsole_router(),
+            Domain::Health => Self::health_router(),
         }
     }
 
@@ -249,6 +250,7 @@ mod harness {
             Domain::Tasks => 13,
             Domain::People => 13,
             Domain::SearchConsole => 8,
+            Domain::Health => 11,
         }
     }
 }
@@ -305,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_single_domain_loads_only_its_tools() {
-        for d in Domain::ALL {
+        for d in Domain::ALL.into_iter().chain(Domain::OPT_IN) {
             let mcp = make_mcp(vec![d]).await;
             let names = tool_names(&mcp);
             let expected_prefix = format!("{}_", d.as_str());
@@ -339,6 +341,40 @@ mod tests {
                 "{d}: count in full set doesn't match domain-only count"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn health_is_opt_in_and_loads_alongside_the_defaults() {
+        let defaults = tool_names(&make_mcp(crate::domain::parse_enabled(None).unwrap()).await);
+        assert!(defaults.iter().all(|n| !n.starts_with("health_")));
+
+        let enabled = crate::domain::parse_enabled(Some("default,health")).unwrap();
+        let names = tool_names(&make_mcp(enabled).await);
+        let health = names.iter().filter(|n| n.starts_with("health_")).count();
+        assert_eq!(health, expected_count(Domain::Health));
+        assert_eq!(names.len(), defaults.len() + health);
+    }
+
+    #[tokio::test]
+    async fn instructions_mention_health_only_when_enabled() {
+        use rmcp::ServerHandler;
+        let text = |d: Vec<Domain>| async move {
+            make_mcp(d)
+                .await
+                .get_info()
+                .instructions
+                .unwrap_or_default()
+        };
+        assert!(
+            !text(Domain::ALL.to_vec())
+                .await
+                .contains("health_list_data_types")
+        );
+        assert!(
+            text(vec![Domain::Gmail, Domain::Health])
+                .await
+                .contains("health_list_data_types")
+        );
     }
 
     #[tokio::test]
@@ -537,8 +573,13 @@ impl ServerHandler for GoogleMcp {
              `https://example.com/` (URL-prefix, trailing slash); pass \
              the `siteUrl` from searchconsole_list_sites verbatim as \
              `site_url`.";
+        let health = if self.state.config.enabled_domains.contains(&Domain::Health) {
+            " Google Health (read-only) is also enabled; start with health_list_data_types."
+        } else {
+            ""
+        };
         info.instructions = Some(format!(
-            "{base}\n\n{}",
+            "{base}{health}\n\n{}",
             file_handling_instructions(self.state.config.file_jail.as_ref())
         ));
         info

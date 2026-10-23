@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-23
+
+### Added
+
+- Opt-in, read-only `health` domain (alias `fitbit`) over the Google Health API
+  v4beta, with 11 tools: `health_list_data_types`, `health_get_identity`,
+  `health_get_profile`, `health_get_settings`, `health_get_irn_profile`,
+  `health_list_paired_devices`, `health_list_data_points`,
+  `health_get_data_point`, `health_rollup`, `health_daily_rollup` and
+  `health_export_exercise_tcx` (written inside `FILE_ROOT`). A static catalog of
+  41 data types gates each tool to the operations the API supports, and list
+  results are slimmed (civil-time duplicates dropped, dates flattened,
+  identical `dataSource` hoisted).
+- `ENABLED_DOMAINS` accepts the token `default`, which expands to the eight
+  standard domains in place, so `default,health` adds Health to everything.
+- Nine read-only `googlehealth.*` OAuth scopes, requested only when `health`
+  is enabled. Enable the Google Health API in the GCP project first.
+- Health calls use a downscoped access token: the Health API rejects tokens
+  that carry any other scope, so the server refreshes a health-only token from
+  the stored refresh token (cached separately per account and scope set). An
+  account that never granted the Health scopes gets a clear sign-in-again error.
+
+### Changed
+
+- Health is not in the default set: unset or empty `ENABLED_DOMAINS` still
+  means the eight standard domains and exactly the scopes it asked for before,
+  so existing deployments see no change and no re-consent.
+
 ## [1.0.2] - 2026-09-23
 
 ### Added
