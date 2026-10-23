@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `/oauth/token` supports the `refresh_token` grant. Access JWTs now live one
+  hour instead of 30 days and come with a rotating refresh token (30 days
+  idle). A refresh token is bound to its client, stored as a SHA-256 hash, and
+  refused after `accounts revoke` or a Google `invalid_grant`; reusing a
+  retired refresh token revokes its whole chain. MCP clients that ignore
+  refresh tokens now authorize again every hour instead of every 30 days.
+- Migration `003_refresh_tokens.sql` adds `mcp_refresh_tokens`. As before
+  002, an existing database is first backed up to
+  `<DATABASE_URL>.pre-003.bak`.
+
 ## [1.1.0] - 2026-10-23
 
 ### Added

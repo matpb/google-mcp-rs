@@ -178,6 +178,8 @@ impl SessionCache {
                 );
                 let _ = accounts::delete(&self.state.db, google_sub).await;
                 let _ = revocations::revoke(&self.state.db, google_sub, now_secs() as i64).await;
+                let _ = crate::storage::refresh_tokens::delete_for_sub(&self.state.db, google_sub)
+                    .await;
                 self.invalidate(google_sub).await;
                 Err(SessionError::ReconnectRequired)
             }

@@ -595,6 +595,14 @@ async fn accounts_revoke(cfg: &ServerConfig, db: &Db, target: &str) {
         "tombstoned sub={} (JWTs issued before now are now invalid)",
         account.google_sub
     );
+    match storage::refresh_tokens::delete_for_sub(db, &account.google_sub).await {
+        Ok(n) => println!("deleted {n} MCP refresh token(s)"),
+        Err(e) => {
+            eprintln!(
+                "could not delete MCP refresh tokens (the tombstone still refuses them): {e}"
+            );
+        }
+    }
 
     match accounts::get_refresh_token(db, &cfg.storage_encryption_key, &account.google_sub).await {
         Ok(Some(rt)) => {

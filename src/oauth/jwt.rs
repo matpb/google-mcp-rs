@@ -16,7 +16,8 @@ use sha2::Sha256;
 use super::JwtError;
 
 /// 30 days.
-pub const TOKEN_LIFETIME_SECS: u64 = 30 * 24 * 3600;
+/// Access JWT lifetime; clients renew with their rotating refresh token.
+pub const TOKEN_LIFETIME_SECS: u64 = 3600;
 
 const MAX_TOKEN_LEN: usize = 8 * 1024;
 const LEEWAY_SECS: i64 = 60;

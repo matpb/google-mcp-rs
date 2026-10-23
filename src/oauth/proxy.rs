@@ -28,7 +28,7 @@ use crate::oauth::jwt::{Claims, TOKEN_LIFETIME_SECS, now_secs, sign as sign_jwt}
 use crate::oauth::oauth_err;
 use crate::oauth::pkce::{constant_time_eq, verify_s256};
 use crate::state::AppState;
-use crate::storage::{accounts, clients, codes};
+use crate::storage::{accounts, clients, codes, refresh_tokens, revocations};
 
 /// Sign a browser-binding cookie name so /authorize and /oauth/google/callback
 /// (and /authorize/consent) agree on it.
@@ -178,7 +178,10 @@ pub async fn authorization_server_metadata(
         token_endpoint: format!("{iss}/oauth/token"),
         registration_endpoint: format!("{iss}/oauth/register"),
         response_types_supported: vec!["code".to_string()],
-        grant_types_supported: vec!["authorization_code".to_string()],
+        grant_types_supported: vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ],
         token_endpoint_auth_methods_supported: vec![
             "client_secret_post".to_string(),
             "none".to_string(),
@@ -314,7 +317,10 @@ pub async fn register(
             client_id_issued_at: now_secs() as i64,
             redirect_uris: req.redirect_uris,
             client_name: req.client_name,
-            grant_types: vec!["authorization_code".to_string()],
+            grant_types: vec![
+                "authorization_code".to_string(),
+                "refresh_token".to_string(),
+            ],
             response_types: vec!["code".to_string()],
             token_endpoint_auth_method: req
                 .token_endpoint_auth_method
@@ -808,6 +814,8 @@ pub struct TokenForm {
     #[serde(default)]
     pub code: Option<String>,
     #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
     pub redirect_uri: Option<String>,
     #[serde(default)]
     pub client_id: Option<String>,
@@ -824,155 +832,277 @@ pub struct TokenResponse {
     pub access_token: String,
     pub token_type: &'static str,
     pub expires_in: u64,
+    pub refresh_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+}
+
+type TokenError = (StatusCode, Json<crate::oauth::OauthErrorBody>);
+
+fn token_err(status: StatusCode, error: &str, description: Option<&str>) -> TokenError {
+    (
+        status,
+        Json(oauth_err(error, description.map(str::to_string))),
+    )
+}
+
+fn server_error<E: std::fmt::Debug>(what: &'static str) -> impl FnOnce(E) -> TokenError {
+    move |e| {
+        tracing::error!(err = ?e, "{what} failed");
+        token_err(StatusCode::INTERNAL_SERVER_ERROR, "server_error", None)
+    }
 }
 
 pub async fn token(
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(req): Form<TokenForm>,
-) -> Result<Json<TokenResponse>, (StatusCode, Json<crate::oauth::OauthErrorBody>)> {
-    if req.grant_type != "authorization_code" {
-        return Err((
+) -> Result<Json<TokenResponse>, TokenError> {
+    match req.grant_type.as_str() {
+        "authorization_code" => authorization_code_grant(&state, &headers, req).await,
+        "refresh_token" => refresh_token_grant(&state, &headers, req).await,
+        _ => Err(token_err(
             StatusCode::BAD_REQUEST,
-            Json(oauth_err(
-                "unsupported_grant_type",
-                Some("only authorization_code is supported".into()),
-            )),
-        ));
+            "unsupported_grant_type",
+            Some("only authorization_code and refresh_token are supported"),
+        )),
     }
+}
+
+async fn authorization_code_grant(
+    state: &AppState,
+    headers: &HeaderMap,
+    req: TokenForm,
+) -> Result<Json<TokenResponse>, TokenError> {
     let code = req.code.ok_or_else(|| {
-        (
+        token_err(
             StatusCode::BAD_REQUEST,
-            Json(oauth_err("invalid_request", Some("missing code".into()))),
+            "invalid_request",
+            Some("missing code"),
         )
     })?;
     let code_verifier = req.code_verifier.ok_or_else(|| {
-        (
+        token_err(
             StatusCode::BAD_REQUEST,
-            Json(oauth_err(
-                "invalid_request",
-                Some("missing code_verifier (PKCE required)".into()),
-            )),
+            "invalid_request",
+            Some("missing code_verifier (PKCE required)"),
         )
     })?;
 
     let stored = codes::consume_code(&state.db, &code)
         .await
-        .map_err(|e| {
-            tracing::error!(err = ?e, "consume_code failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(oauth_err("server_error", None)),
-            )
-        })?
+        .map_err(server_error("consume_code"))?
         .ok_or_else(|| {
-            (
+            token_err(
                 StatusCode::BAD_REQUEST,
-                Json(oauth_err(
-                    "invalid_grant",
-                    Some("code expired or already used".into()),
-                )),
+                "invalid_grant",
+                Some("code expired or already used"),
             )
         })?;
 
     if let Some(client_id) = req.client_id.as_deref()
         && client_id != stored.mcp_client_id
     {
-        return Err((
+        return Err(token_err(
             StatusCode::BAD_REQUEST,
-            Json(oauth_err(
-                "invalid_client",
-                Some("client_id does not match code".into()),
-            )),
+            "invalid_client",
+            Some("client_id does not match code"),
         ));
     }
-
-    let client = clients::get(&state.db, &stored.mcp_client_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(err = ?e, "client lookup failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(oauth_err("server_error", None)),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(oauth_err("invalid_client", Some("client not found".into()))),
-            )
-        })?;
-
-    if let Some(secret) = req.client_secret.as_deref()
-        && !clients::verify_secret(secret, &client.client_secret_hash).await
-    {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(oauth_err(
-                "invalid_client",
-                Some("invalid client_secret".into()),
-            )),
-        ));
-    }
+    authenticate_client(state, &stored.mcp_client_id, req.client_secret.as_deref()).await?;
 
     if let Some(supplied_redirect) = req.redirect_uri.as_deref()
         && supplied_redirect != stored.mcp_redirect_uri
     {
-        return Err((
+        return Err(token_err(
             StatusCode::BAD_REQUEST,
-            Json(oauth_err(
-                "invalid_grant",
-                Some("redirect_uri does not match authorization request".into()),
-            )),
+            "invalid_grant",
+            Some("redirect_uri does not match authorization request"),
         ));
     }
 
     if !verify_s256(&code_verifier, &stored.code_challenge) {
-        return Err((
+        return Err(token_err(
             StatusCode::BAD_REQUEST,
-            Json(oauth_err(
-                "invalid_grant",
-                Some("PKCE verification failed".into()),
-            )),
+            "invalid_grant",
+            Some("PKCE verification failed"),
         ));
     }
 
+    let resource = req.resource.or(stored.resource);
+    check_resource(state, resource.as_deref())?;
+    let family_id = Uuid::new_v4().simple().to_string();
+    issue_tokens(
+        state,
+        headers,
+        &stored.mcp_client_id,
+        stored.google_sub,
+        resource,
+        family_id,
+    )
+    .await
+}
+
+async fn refresh_token_grant(
+    state: &AppState,
+    headers: &HeaderMap,
+    req: TokenForm,
+) -> Result<Json<TokenResponse>, TokenError> {
+    let invalid = |why: &str| token_err(StatusCode::BAD_REQUEST, "invalid_grant", Some(why));
+    let token = req.refresh_token.ok_or_else(|| {
+        token_err(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            Some("missing refresh_token"),
+        )
+    })?;
+    let client_id = req.client_id.ok_or_else(|| {
+        token_err(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            Some("missing client_id"),
+        )
+    })?;
+
+    let grant = match refresh_tokens::redeem(&state.db, &token)
+        .await
+        .map_err(server_error("refresh token lookup"))?
+    {
+        refresh_tokens::Redeemed::Valid(grant) => grant,
+        refresh_tokens::Redeemed::Invalid => {
+            return Err(invalid("refresh token expired, unknown or revoked"));
+        }
+        refresh_tokens::Redeemed::Replayed => {
+            tracing::warn!("refresh token replayed; revoked its family");
+            return Err(invalid("refresh token already used; authorize again"));
+        }
+    };
+    // Every refusal below ends the family: the successor is never issued.
+    let refuse = async |why: &str| {
+        let _ = refresh_tokens::delete_family(&state.db, &grant.family_id).await;
+        invalid(why)
+    };
+
+    if grant.mcp_client_id != client_id {
+        return Err(refuse("refresh token was issued to another client").await);
+    }
+    if let Err(e) = authenticate_client(state, &client_id, req.client_secret.as_deref()).await {
+        let _ = refresh_tokens::delete_family(&state.db, &grant.family_id).await;
+        return Err(e);
+    }
+    match revocations::not_before(&state.db, &grant.google_sub)
+        .await
+        .map_err(server_error("revocation lookup"))?
+    {
+        Some(nb) if grant.issued_at <= nb => {
+            return Err(refuse("account access was revoked; authorize again").await);
+        }
+        _ => {}
+    }
+    if accounts::get(&state.db, &grant.google_sub)
+        .await
+        .map_err(server_error("account lookup"))?
+        .is_none()
+    {
+        return Err(refuse("Google account is no longer connected; authorize again").await);
+    }
+
+    let resource = req.resource.or(grant.resource);
+    check_resource(state, resource.as_deref())?;
+    issue_tokens(
+        state,
+        headers,
+        &client_id,
+        grant.google_sub,
+        resource,
+        grant.family_id,
+    )
+    .await
+}
+
+async fn authenticate_client(
+    state: &AppState,
+    client_id: &str,
+    secret: Option<&str>,
+) -> Result<(), TokenError> {
+    let client = clients::get(&state.db, client_id)
+        .await
+        .map_err(server_error("client lookup"))?
+        .ok_or_else(|| {
+            token_err(
+                StatusCode::BAD_REQUEST,
+                "invalid_client",
+                Some("client not found"),
+            )
+        })?;
+    if let Some(secret) = secret
+        && !clients::verify_secret(secret, &client.client_secret_hash).await
+    {
+        return Err(token_err(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            Some("invalid client_secret"),
+        ));
+    }
+    Ok(())
+}
+
+fn check_resource(state: &AppState, resource: Option<&str>) -> Result<(), TokenError> {
     let allowed_hosts =
         host_guard::build_allowed_hosts(&state.config.base_url, &state.config.allowed_hosts);
-    if let Some(resource) = req.resource.as_deref().or(stored.resource.as_deref())
-        && !resource_target_valid(resource, &allowed_hosts)
-    {
-        return Err((
+    match resource {
+        Some(resource) if !resource_target_valid(resource, &allowed_hosts) => Err((
             StatusCode::BAD_REQUEST,
             Json(oauth_err(
                 "invalid_target",
                 Some(format!("resource not allowed: {resource}")),
             )),
-        ));
+        )),
+        _ => Ok(()),
     }
+}
 
-    let iss = issuer_from_headers(&headers, &state.config.base_url);
+/// Sign an access JWT and rotate in the family's next refresh token.
+async fn issue_tokens(
+    state: &AppState,
+    headers: &HeaderMap,
+    client_id: &str,
+    google_sub: String,
+    resource: Option<String>,
+    family_id: String,
+) -> Result<Json<TokenResponse>, TokenError> {
+    let iss = issuer_from_headers(headers, &state.config.base_url);
     let now = now_secs();
     let claims = Claims {
         iss: iss.clone(),
-        sub: stored.google_sub,
+        sub: google_sub.clone(),
         iat: now,
         exp: now + TOKEN_LIFETIME_SECS,
         aud: format!("{iss}/mcp"),
     };
-    let jwt = sign_jwt(&state.config.jwt_secret, &claims).map_err(|e| {
-        tracing::error!(err = ?e, "JWT sign failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(oauth_err("server_error", None)),
-        )
-    })?;
+    let jwt = sign_jwt(&state.config.jwt_secret, &claims).map_err(server_error("JWT sign"))?;
+
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).expect("OS RNG failure");
+    let refresh_token = format!("mcpr_{}", URL_SAFE_NO_PAD.encode(bytes));
+    refresh_tokens::issue(
+        &state.db,
+        &refresh_token,
+        refresh_tokens::IssueRefresh {
+            family_id,
+            mcp_client_id: client_id.to_string(),
+            google_sub,
+            resource,
+        },
+    )
+    .await
+    .map_err(server_error("refresh token insert"))?;
+
     Ok(Json(TokenResponse {
         access_token: jwt,
         token_type: "Bearer",
         expires_in: TOKEN_LIFETIME_SECS,
+        refresh_token,
         scope: None,
     }))
 }
@@ -1404,5 +1534,170 @@ mod tests {
         // No Cookie header at all: the browser-binding check must fail closed.
         let resp = google_callback(State(state.clone()), HeaderMap::new(), Query(q)).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------
+    // /oauth/token: refresh tokens
+    // -----------------------------------------------------------------
+
+    const VERIFIER: &str = "a-pkce-verifier-that-is-long-enough-for-s256-0123456789";
+
+    /// A connected account, a registered client and a redeemable code for them.
+    async fn code_for(state: &AppState, client_id: &str, sub: &str) -> String {
+        seed_client(state, client_id, "http://127.0.0.1:9/cb").await;
+        accounts::upsert(
+            &state.db,
+            &[0u8; 32],
+            accounts::UpsertAccount {
+                google_sub: sub.to_string(),
+                email: format!("{sub}@example.com"),
+                refresh_token: "google-rt".to_string(),
+                scopes: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let code = format!("mcpc_{client_id}");
+        codes::insert_code(
+            &state.db,
+            codes::InsertCode {
+                code: code.clone(),
+                mcp_client_id: client_id.to_string(),
+                mcp_redirect_uri: "http://127.0.0.1:9/cb".to_string(),
+                code_challenge: URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes())),
+                google_sub: sub.to_string(),
+                resource: Some("http://localhost:8433/mcp".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        code
+    }
+
+    fn form(grant_type: &str, client_id: &str) -> TokenForm {
+        TokenForm {
+            grant_type: grant_type.to_string(),
+            code: None,
+            refresh_token: None,
+            redirect_uri: None,
+            client_id: Some(client_id.to_string()),
+            client_secret: None,
+            code_verifier: None,
+            resource: None,
+        }
+    }
+
+    async fn exchange(state: &AppState, code: &str, client_id: &str) -> TokenResponse {
+        let mut f = form("authorization_code", client_id);
+        f.code = Some(code.to_string());
+        f.code_verifier = Some(VERIFIER.to_string());
+        let headers = h("localhost:8433", None);
+        token(State(state.clone()), headers, Form(f))
+            .await
+            .unwrap()
+            .0
+    }
+
+    async fn refresh(
+        state: &AppState,
+        refresh_token: &str,
+        client_id: &str,
+    ) -> Result<TokenResponse, String> {
+        let mut f = form("refresh_token", client_id);
+        f.refresh_token = Some(refresh_token.to_string());
+        let headers = h("localhost:8433", None);
+        token(State(state.clone()), headers, Form(f))
+            .await
+            .map(|r| r.0)
+            .map_err(|(status, body)| {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                body.0.error
+            })
+    }
+
+    async fn refused(state: &AppState, refresh_token: &str, client_id: &str) -> String {
+        match refresh(state, refresh_token, client_id).await {
+            Ok(_) => panic!("refresh was accepted"),
+            Err(error) => error,
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_rotates_and_a_replay_revokes_the_family() {
+        let state = app_state("http://localhost:8433").await;
+        let code = code_for(&state, "cid", "sub-1").await;
+        let first = exchange(&state, &code, "cid").await;
+        assert_eq!(first.expires_in, TOKEN_LIFETIME_SECS);
+
+        let second = refresh(&state, &first.refresh_token, "cid").await.unwrap();
+        assert_ne!(second.refresh_token, first.refresh_token);
+        let claims = crate::oauth::jwt::verify(&second.access_token, &[0u8; 32], |_| true).unwrap();
+        assert_eq!(claims.sub, "sub-1");
+
+        // The old token was copied: refuse it and end the family it belongs to.
+        assert_eq!(
+            refused(&state, &first.refresh_token, "cid").await,
+            "invalid_grant"
+        );
+        assert_eq!(
+            refused(&state, &second.refresh_token, "cid").await,
+            "invalid_grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_is_bound_to_its_client() {
+        let state = app_state("http://localhost:8433").await;
+        let code = code_for(&state, "cid", "sub-1").await;
+        seed_client(&state, "other", "http://127.0.0.1:9/cb").await;
+        let first = exchange(&state, &code, "cid").await;
+        assert_eq!(
+            refused(&state, &first.refresh_token, "other").await,
+            "invalid_grant"
+        );
+        assert_eq!(
+            refused(&state, &first.refresh_token, "cid").await,
+            "invalid_grant",
+            "a refused attempt ends the family"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_after_revocation_or_disconnect_is_refused() {
+        let state = app_state("http://localhost:8433").await;
+        let code = code_for(&state, "cid", "sub-1").await;
+        let first = exchange(&state, &code, "cid").await;
+        revocations::revoke(&state.db, "sub-1", now_secs() as i64)
+            .await
+            .unwrap();
+        assert_eq!(
+            refused(&state, &first.refresh_token, "cid").await,
+            "invalid_grant"
+        );
+
+        let code = code_for(&state, "cid2", "sub-2").await;
+        let first = exchange(&state, &code, "cid2").await;
+        accounts::delete(&state.db, "sub-2").await.unwrap();
+        assert_eq!(
+            refused(&state, &first.refresh_token, "cid2").await,
+            "invalid_grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_requires_token_and_client_id() {
+        let state = app_state("http://localhost:8433").await;
+        let mut f = form("refresh_token", "cid");
+        f.client_id = None;
+        f.refresh_token = Some("mcpr_x".to_string());
+        let Err((_, body)) = token(State(state.clone()), h("localhost:8433", None), Form(f)).await
+        else {
+            panic!("refresh without client_id was accepted");
+        };
+        assert_eq!(body.0.error, "invalid_request");
+        assert_eq!(
+            refused(&state, "mcpr_unknown", "cid").await,
+            "invalid_grant"
+        );
     }
 }

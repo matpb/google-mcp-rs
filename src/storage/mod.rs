@@ -9,6 +9,7 @@ pub mod accounts;
 pub mod clients;
 pub mod codes;
 pub mod crypto;
+pub mod refresh_tokens;
 pub mod revocations;
 
 use std::sync::{Arc, Mutex};
@@ -48,9 +49,15 @@ pub enum DbError {
 
 const MIGRATION_001: &str = include_str!("migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("migrations/002_consent_and_revocation.sql");
+const MIGRATION_003: &str = include_str!("migrations/003_refresh_tokens.sql");
+const LATEST_VERSION: i64 = 3;
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(MIGRATION_001), M::up(MIGRATION_002)])
+    Migrations::new(vec![
+        M::up(MIGRATION_001),
+        M::up(MIGRATION_002),
+        M::up(MIGRATION_003),
+    ])
 }
 
 /// Create the DB file at mode 0600 if absent, or tighten it if group/other
@@ -85,16 +92,17 @@ fn ensure_file_permissions(_path: &str) -> Result<(), DbError> {
 }
 
 /// `rusqlite_migration` errors `DatabaseTooFarAhead` if an older binary later
-/// opens a migrated DB, so back up before the 002 migration runs.
+/// opens a migrated DB, so back up an existing DB before any migration runs,
+/// as `<path>.pre-<next version>.bak`.
 fn backup_before_migration(conn: &Connection, path: &str) -> Result<(), DbError> {
     if path == ":memory:" || path.is_empty() {
         return Ok(());
     }
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version != 1 {
+    if !(1..LATEST_VERSION).contains(&version) {
         return Ok(());
     }
-    let backup_path = format!("{path}.pre-002.bak");
+    let backup_path = format!("{path}.pre-{:03}.bak", version + 1);
     if std::path::Path::new(&backup_path).exists() {
         return Ok(());
     }
@@ -164,6 +172,16 @@ pub fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latest_version_counts_every_migration() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, LATEST_VERSION);
+    }
 
     #[tokio::test]
     async fn migrations_run_on_in_memory() {
