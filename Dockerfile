@@ -1,5 +1,5 @@
 # Tag and digest together, so digest bumps stay on this tag.
-FROM rust:1.94-alpine@sha256:77237dd363a0b127bb5ef532c2d64c0deb380b738e43a9c4bdac73398d6d0a08 AS builder
+FROM rust:1.98-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f AS builder
 WORKDIR /build
 RUN apk upgrade --no-cache && apk add --no-cache musl-dev
 
