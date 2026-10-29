@@ -21,6 +21,7 @@ use crate::mcp::server::GoogleMcp;
 impl GoogleMcp {
     #[tool(
         name = "calendar_list_calendars",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List the calendars on the user's calendar list (primary + any subscribed calendars). Returns `{ items: [{id, summary, accessRole, primary, …}], nextPageToken }`. Use this to discover calendar IDs for the other tools."
     )]
     async fn calendar_list_calendars(
@@ -43,6 +44,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_get_calendar",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get a calendar's metadata (summary, description, time zone, location). Use `\"primary\"` for the user's main calendar."
     )]
     async fn calendar_get_calendar(
@@ -61,6 +63,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_create_calendar",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a new secondary calendar owned by the authenticated user. Returns the full calendar resource (including its `id`, which is what other Calendar tools expect)."
     )]
     async fn calendar_create_calendar(
@@ -88,6 +95,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_delete_calendar",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Permanently delete a secondary calendar. **Irreversible** — every event in the calendar is removed. The user's primary calendar cannot be deleted."
     )]
     async fn calendar_delete_calendar(
@@ -106,6 +118,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_list_events",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List or search events on a calendar. By default expands recurring events into individual instances (`single_events=true`) so each item has a concrete start/end. Filter with `time_min`/`time_max` (RFC3339), `q` (free-text search), or `updated_min`. Returns `{ items: [...], nextPageToken, timeZone }`."
     )]
     async fn calendar_list_events(
@@ -137,6 +150,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_get_event",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get a single event by ID. Returns the full Event resource including attendees, recurrence, conferenceData, attachments, and reminders."
     )]
     async fn calendar_get_event(
@@ -155,6 +169,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_create_event",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create an event. Pass timed events with `start_date_time` + `end_date_time` (RFC3339), all-day events with `start_date` + `end_date` (YYYY-MM-DD; end is exclusive). For recurring events also pass `recurrence` (RRULE strings) and `time_zone`. Set `add_conference=true` to attach a Google Meet link. `send_updates` controls whether attendees are emailed (default `none`)."
     )]
     async fn calendar_create_event(
@@ -186,6 +205,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_quick_add_event",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create an event from a single natural-language string, e.g. `Lunch with Sara tomorrow at 1pm`. Google's parser is the same as the one in the Calendar UI's quick-add bar. Returns the parsed Event resource."
     )]
     async fn calendar_quick_add_event(
@@ -208,6 +232,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_patch_event",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Partially update an event. Only the fields you set are touched. **Note**: setting `attendees` REPLACES the list — fetch the event first if you need to add or remove a single attendee. `send_updates` controls invite emails."
     )]
     async fn calendar_patch_event(
@@ -247,6 +276,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_delete_event",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Delete an event. **Irreversible** — for cancellations that should notify attendees, set `send_updates=\"all\"`."
     )]
     async fn calendar_delete_event(
@@ -266,6 +300,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_move_event",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Move an event from one calendar to another (the user must have write access to both). Recurring events can only be moved as a whole series."
     )]
     async fn calendar_move_event(
@@ -290,6 +329,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_respond_to_event",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Set the authenticated user's (or another attendee's) `responseStatus` on an event: `accepted`, `declined`, or `tentative`. Optionally include a comment shown to organisers. Requires the user to already be on the attendee list (otherwise Google rejects with 400)."
     )]
     async fn calendar_respond_to_event(
@@ -369,6 +413,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_freebusy",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Query free/busy intervals across one or more calendars within a time window. Returns `{ calendars: { id: { busy: [{start, end}] } } }`. Use this before scheduling to find conflicts."
     )]
     async fn calendar_freebusy(
@@ -400,6 +445,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "calendar_list_colors",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Return the palette of `colorId`s recognized by the Calendar UI, both for calendars (`calendar`) and events (`event`). Each entry has `background` and `foreground` hex colors."
     )]
     async fn calendar_list_colors(

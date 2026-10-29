@@ -350,6 +350,8 @@ setfacl -m u:65532:rwx ~/Downloads
 
 ## Tools
 
+Every tool carries MCP tool annotations, so clients can ask before the risky ones: reads are `readOnlyHint: true`; writes say `destructiveHint: true` when they lose data, cannot be undone or reach other people (`gmail_send`, `gmail_send_draft`, `drive_share_file`, deletes, overwrites), and `destructiveHint: false` when they only add or are easily reversed (drafts, labels, new files). `openWorldHint: true` marks the tools that reach people or URLs outside the account.
+
 ### Gmail (28)
 
 | Tool | Purpose |

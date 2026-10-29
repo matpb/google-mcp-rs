@@ -28,6 +28,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_profile",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Return the connected Google account's email, the granted scopes, and Gmail's idea of total counts (messagesTotal, threadsTotal, historyId). Useful for confirming which mailbox the JWT is bound to."
     )]
     async fn gmail_get_profile(
@@ -51,6 +52,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_search_threads",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Search threads with Gmail query syntax (e.g. `from:foo is:unread newer_than:7d`). Returns a list of thread IDs and a nextPageToken cursor when there are more."
     )]
     async fn gmail_search_threads(
@@ -73,6 +75,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_thread",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch a thread with all its messages. Default `format=full` returns parsed payload (headers + decoded body parts). Use `metadata` to skip bodies, `raw` for the source RFC 5322."
     )]
     async fn gmail_get_thread(
@@ -90,6 +93,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_thread_url",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Build the Gmail web UI URL for a thread, scoped to the connected account so it routes correctly even when the user is signed into multiple Google accounts in the browser."
     )]
     async fn gmail_get_thread_url(
@@ -116,6 +120,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_list_messages",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List messages, optionally filtered by Gmail query syntax. Returns IDs + thread IDs + nextPageToken."
     )]
     async fn gmail_list_messages(
@@ -139,6 +144,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_message",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch a single message. Default `format=full` returns parsed payload. Pass `metadata_headers` (e.g. [\"Subject\",\"From\"]) with `format=metadata` to fetch only specific headers cheaply."
     )]
     async fn gmail_get_message(
@@ -160,6 +166,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_list_attachments",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Walk a message's MIME tree and return a flat list of attachment descriptors {filename, mimeType, attachmentId, size}. Inline parts (with `Content-Disposition: inline`) are NOT included unless they have a filename."
     )]
     async fn gmail_list_attachments(
@@ -181,6 +188,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_download_attachment",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Download an attachment by message + attachment ID. Preferred: set `dest_path` (inside FILE_ROOT) to write bytes to disk, or `to_drive_folder_id` to push straight into Drive — neither routes bytes through the model's context. Without either, returns `{ size, data }` where `data` is base64url (capped when a file-exchange dir is available)."
     )]
     async fn gmail_download_attachment(
@@ -286,6 +298,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_list_drafts",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List drafts. Optional Gmail query (`q`) filters by content/recipient/etc."
     )]
     async fn gmail_list_drafts(
@@ -303,6 +316,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_draft",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch a draft by ID, including its underlying message."
     )]
     async fn gmail_get_draft(
@@ -320,6 +334,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_create_draft",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a draft. Set `reply_to_message_id` to thread the draft as a reply (the tool fetches the original's Message-Id/References/Subject and threadId automatically)."
     )]
     async fn gmail_create_draft(
@@ -347,6 +366,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_update_draft",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Replace the contents of an existing draft. Same compose surface as gmail_send."
     )]
     async fn gmail_update_draft(
@@ -374,6 +398,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_delete_draft",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Delete a draft permanently."
     )]
     async fn gmail_delete_draft(
@@ -388,6 +417,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_send_draft",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        ),
         description = "Send a previously created draft."
     )]
     async fn gmail_send_draft(
@@ -406,6 +440,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_send",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        ),
         description = "Send an email. Set `reply_to_message_id` to send as a threaded reply (In-Reply-To/References/Subject + threadId are wired automatically). Set `attachments` to add files (base64 inline or absolute server path; 24 MB total cap). NOTE: this sends immediately — route to gmail_create_draft when you want explicit human approval first."
     )]
     async fn gmail_send(
@@ -437,6 +476,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_list_labels",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List all labels in the mailbox (system + user-created)."
     )]
     async fn gmail_list_labels(
@@ -450,6 +490,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_label",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch a label by ID, including message/thread totals and color."
     )]
     async fn gmail_get_label(
@@ -464,6 +505,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_create_label",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a new label. Optional `color` uses Gmail's restricted palette (see https://developers.google.com/gmail/api/reference/rest/v1/users.labels#color)."
     )]
     async fn gmail_create_label(
@@ -484,6 +530,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_update_label",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Rename a label or change its color/visibility. Pass only the fields you want to update."
     )]
     async fn gmail_update_label(
@@ -504,6 +555,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_delete_label",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Delete a label. The label is removed from any messages it was applied to."
     )]
     async fn gmail_delete_label(
@@ -522,6 +578,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_list_filters",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List every Gmail filter with its id, criteria and action. Needs the gmail.settings.basic scope: a connection authorized before filter support returns auth_required and must be re-authorized."
     )]
     async fn gmail_list_filters(
@@ -538,6 +595,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_create_filter",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a Gmail filter for incoming mail (it does not touch existing messages). `criteria` needs at least one field, `action` at least one label change. Actions are label edits only: user label IDs from gmail_list_labels plus system IDs (remove INBOX = skip inbox, remove UNREAD = mark read, add STARRED, add/remove IMPORTANT, add TRASH = delete, remove SPAM = never spam). Forwarding is deliberately unsupported. Gmail has no filter update: to edit one, gmail_delete_filter it and create the replacement. Returns the created filter."
     )]
     async fn gmail_create_filter(
@@ -553,6 +615,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_delete_filter",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Delete a Gmail filter by ID (from gmail_list_filters). Messages it already labeled stay as they are."
     )]
     async fn gmail_delete_filter(
@@ -574,6 +641,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_modify_labels",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Add/remove label IDs on a single message OR thread. Pass `target=\"message\"` or `target=\"thread\"` and the corresponding ID. At least one of `add_label_ids` / `remove_label_ids` must be non-empty."
     )]
     async fn gmail_modify_labels(
@@ -603,6 +675,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_mark_read",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Remove the UNREAD label from one or more messages or threads."
     )]
     async fn gmail_mark_read(
@@ -623,6 +700,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_mark_unread",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Add the UNREAD label to one or more messages or threads."
     )]
     async fn gmail_mark_unread(
@@ -643,6 +725,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_archive",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Remove the INBOX label from one or more messages or threads (archives them)."
     )]
     async fn gmail_archive(
@@ -663,6 +750,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_trash",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Move one or more messages or threads to Trash. Reversible from Gmail's UI for ~30 days."
     )]
     async fn gmail_trash(

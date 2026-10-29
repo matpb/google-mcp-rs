@@ -17,6 +17,7 @@ use crate::mcp::server::GoogleMcp;
 impl GoogleMcp {
     #[tool(
         name = "tasks_list_tasklists",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List the user's task lists. Returns `{ items: [{id, title, updated}, ...] }`. The list `id` is what every other tasks_* tool takes as `tasklist_id`; `@default` always resolves to the user's default list."
     )]
     async fn tasks_list_tasklists(
@@ -34,6 +35,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "tasks_get_tasklist",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get one task list's metadata by ID (or `@default`)."
     )]
     async fn tasks_get_tasklist(
@@ -52,6 +54,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "tasks_create_tasklist",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a new task list. Returns the new list resource including its `id`."
     )]
     async fn tasks_create_tasklist(
@@ -70,6 +77,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "tasks_update_tasklist",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Rename an existing task list."
     )]
     async fn tasks_update_tasklist(
@@ -89,6 +101,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "tasks_delete_tasklist",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Delete a task list and every task in it. Irreversible — there is no trash for task lists. Prefer `tasks_clear_completed` when you only want to tidy up."
     )]
     async fn tasks_delete_tasklist(
@@ -107,6 +124,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "tasks_list",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List the tasks in a list (default `@default`). Subtasks carry a `parent` field and `position` orders siblings. Set `show_completed=false` for the open items only."
     )]
     async fn tasks_list(
@@ -135,7 +153,11 @@ impl GoogleMcp {
             .map_err(|e| common::reclassify_not_found(e, "tasklist", &id, "tasks"))
     }
 
-    #[tool(name = "tasks_get", description = "Get one task by ID.")]
+    #[tool(
+        name = "tasks_get",
+        annotations(read_only_hint = true, open_world_hint = false),
+        description = "Get one task by ID."
+    )]
     async fn tasks_get(
         &self,
         Extension(parts): Extension<Parts>,
@@ -152,6 +174,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "tasks_create",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a task. `due` is RFC3339 but Google Tasks keeps only the DATE part — a time of day is silently dropped, so tasks cannot carry a due time. Pass `parent` to make it a subtask, `previous` to place it after a given sibling."
     )]
     async fn tasks_create(
@@ -187,6 +214,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "tasks_update",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Patch a task's title, notes, due date, or status. Only the fields you pass are touched. Pass `due=\"\"` to clear the due date; setting `status=needsAction` reopens a completed task."
     )]
     async fn tasks_update(
@@ -230,6 +262,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "tasks_complete",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Convenience: tick a task off (or untick it with `completed=false`). Wraps `tasks_update`'s status flip and clears the completion timestamp when reopening."
     )]
     async fn tasks_complete(
@@ -253,6 +290,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "tasks_move",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Reposition a task: reparent it (`parent`), reorder it among siblings (`previous`), or send it to another list (`destination_tasklist`). Omitting `previous` moves it to the top."
     )]
     async fn tasks_move(
@@ -277,6 +319,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "tasks_delete",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Delete a task. It is soft-deleted (recoverable via `tasks_list` with `show_deleted=true` until the list is cleared)."
     )]
     async fn tasks_delete(
@@ -295,6 +342,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "tasks_clear_completed",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Hide every completed task in a list (the Tasks UI's \"Delete all completed tasks\"). They stop appearing in normal listings but remain reachable with `show_hidden=true`."
     )]
     async fn tasks_clear_completed(

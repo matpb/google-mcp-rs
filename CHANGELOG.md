@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- MCP tool annotations on every tool (`readOnlyHint`, `destructiveHint`,
+  `openWorldHint`), so clients can confirm sends, shares and deletes while
+  letting reads through. `gmail_send`, `gmail_send_draft` and
+  `drive_share_file` are marked destructive: they cannot be undone.
+
 ## [1.1.0] - 2026-10-23
 
 ### Added
