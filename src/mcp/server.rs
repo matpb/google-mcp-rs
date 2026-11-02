@@ -242,7 +242,7 @@ mod harness {
     /// continue to mean something.
     pub(crate) fn expected_count(d: Domain) -> usize {
         match d {
-            Domain::Gmail => 28,
+            Domain::Gmail => 29,
             Domain::Sheets => 11,
             Domain::Drive => 14,
             Domain::Docs => 12,
@@ -445,6 +445,12 @@ mod tests {
             names.len(),
             "duplicate tool name in composed router — two domains define the same tool"
         );
+    }
+
+    #[tokio::test]
+    async fn gmail_get_signature_registered_for_gmail() {
+        let mcp = make_mcp(vec![Domain::Gmail]).await;
+        assert!(tool_names(&mcp).contains(&"gmail_get_signature".to_string()));
     }
 
     #[tokio::test]

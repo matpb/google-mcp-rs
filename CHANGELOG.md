@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-02
+
+### Added
+
+- `gmail_get_signature` (read-only) returns the Gmail signature for a send-as
+  address, as HTML and as plain text. Defaults to the account's default
+  send-as address.
+- `append_signature` on `gmail_create_draft`, `gmail_update_draft` and
+  `gmail_send` appends the sender's Gmail signature, since the API never adds
+  it on its own. Default `false`: no behaviour change unless it is set.
+- No new OAuth scope: sendAs reads accept gmail.modify.
+
 ## [1.1.0] - 2026-10-23
 
 ### Added

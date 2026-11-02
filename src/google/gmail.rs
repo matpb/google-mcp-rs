@@ -498,6 +498,16 @@ impl GmailClient {
         .await
     }
 
+    pub async fn list_send_as(&self) -> Result<Value, GmailError> {
+        self.request(
+            Method::GET,
+            format!("{BASE}/settings/sendAs"),
+            None::<&()>,
+            &[],
+        )
+        .await
+    }
+
     // --- internals -------------------------------------------------------
 
     async fn request<B: Serialize + ?Sized>(

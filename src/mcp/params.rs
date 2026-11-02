@@ -155,6 +155,9 @@ pub struct GmailComposeParams {
     /// Only set this if you know what you're doing.
     #[serde(default)]
     pub thread_id: Option<String>,
+    /// Append the sender's Gmail signature (from Gmail settings, the sendAs entry matching the From address). HTML part gets it in a `gmail_signature` div; a text-only body is turned into HTML so the draft is multipart. Default false.
+    #[serde(default)]
+    pub append_signature: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -201,6 +204,13 @@ pub struct GmailDeleteDraftParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GmailSendDraftParams {
     pub id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GmailGetSignatureParams {
+    /// Send-as address to read. Default: the default send-as address.
+    #[serde(default)]
+    pub send_as_email: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1631,4 +1641,42 @@ pub struct SearchConsoleInspectUrlParams {
     /// BCP-47 code for the result text, default `en-US`.
     #[serde(default)]
     pub language_code: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn compose_params_append_signature_defaults_false() {
+        let base = json!({"to": [{"email": "you@example.com"}], "body_text": "x"});
+        let p: GmailComposeParams = serde_json::from_value(base.clone()).unwrap();
+        assert!(!p.append_signature);
+
+        let mut on = base;
+        on["append_signature"] = json!(true);
+        let p: GmailComposeParams = serde_json::from_value(on).unwrap();
+        assert!(p.append_signature);
+    }
+
+    #[test]
+    fn send_params_flatten_append_signature() {
+        let p: GmailSendParams = serde_json::from_value(json!({
+            "to": [{"email": "you@example.com"}],
+            "body_text": "x",
+            "append_signature": true
+        }))
+        .unwrap();
+        assert!(p.compose.append_signature);
+    }
+
+    #[test]
+    fn get_signature_params_send_as_email_is_optional() {
+        let p: GmailGetSignatureParams = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(p.send_as_email, None);
+        let p: GmailGetSignatureParams =
+            serde_json::from_value(json!({"send_as_email": "alias@example.com"})).unwrap();
+        assert_eq!(p.send_as_email.as_deref(), Some("alias@example.com"));
+    }
 }
