@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- MCP tool annotations on every tool (`readOnlyHint`, `destructiveHint`,
+  `openWorldHint`), so clients can confirm sends, shares and deletes while
+  letting reads through. `gmail_send`, `gmail_send_draft` and
+  `drive_share_file` are marked destructive: they cannot be undone.
+  Calendar event writes are open-world, since `send_updates` can email
+  guests, and `calendar_create_event`, `calendar_quick_add_event` and
+  `gmail_create_filter` (which can trash future mail) are destructive.
+
 ## [1.2.0] - 2026-11-02
 
 ### Added

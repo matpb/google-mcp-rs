@@ -24,6 +24,7 @@ const MAX_BATCH_GET_CONTACTS: usize = 200;
 impl GoogleMcp {
     #[tool(
         name = "people_list_contacts",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List the user's saved contacts (People `connections`). Returns `{ connections: [...], nextPageToken, totalPeople }`. Each entry's `resourceName` (`people/c123...`) is what the other people_* tools take. Page through with `page_token`; this is the complete address book, so prefer people_search_contacts when looking for someone specific."
     )]
     async fn people_list_contacts(
@@ -47,6 +48,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_get_contact",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get one contact by resource name (`people/c123...`) or bare ID. Returns the full Person resource including its `etag`, which people_update_contact needs."
     )]
     async fn people_get_contact(
@@ -67,6 +69,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_batch_get_contacts",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get up to 200 contacts in one call by resource name or bare ID. Returns `{ responses: [{ httpStatusCode, person }, ...] }` — check each entry, a bad ID fails only its own slot."
     )]
     async fn people_batch_get_contacts(
@@ -105,6 +108,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_search_contacts",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Search the user's contacts by name, nickname, email, phone or organization. Matching is prefix-based, so `jos` finds Joseph but `seph` does not. Returns `{ results: [{ person }, ...] }`. This is the cheap way to resolve a person to a `resourceName` before reading or editing them."
     )]
     async fn people_search_contacts(
@@ -124,6 +128,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_create_contact",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a contact. Supply the convenience fields (`given_name`, `family_name`, `emails`, `phones`, `organization`, `job_title`, `notes`, `birthday`, `addresses`, `urls`), or pass a raw People `Person` resource as `person` to set anything this tool does not model. Returns the created Person including its `resourceName`."
     )]
     async fn people_create_contact(
@@ -148,6 +157,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_update_contact",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Update a contact. Each field group you supply REPLACES the existing one wholesale — passing `emails` replaces every address, it does not append, so read the contact first if you mean to add. `etag` and `update_person_fields` are fetched and derived automatically when omitted."
     )]
     async fn people_update_contact(
@@ -200,6 +214,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_delete_contact",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "**Irreversibly** delete a contact. There is no trash for People — the contact is gone."
     )]
     async fn people_delete_contact(
@@ -219,6 +238,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_list_contact_groups",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List contact groups (the labels in the Contacts UI). Includes system groups like `contactGroups/myContacts` and `contactGroups/starred` alongside user-created ones."
     )]
     async fn people_list_contact_groups(
@@ -236,6 +256,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_get_contact_group",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get one contact group. Set `max_members` above 0 to also return its members' contact resource names."
     )]
     async fn people_get_contact_group(
@@ -255,6 +276,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_create_contact_group",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a contact group (label). Returns the new group including its `resourceName`."
     )]
     async fn people_create_contact_group(
@@ -273,6 +299,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_update_contact_group",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Rename a user-created contact group. System groups (`myContacts`, `starred`, ...) cannot be renamed. `etag` is fetched automatically when omitted."
     )]
     async fn people_update_contact_group(
@@ -310,6 +341,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_delete_contact_group",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Delete a user-created contact group. By default the contacts survive and only lose the label; set `delete_contacts=true` to **irreversibly** delete every contact in it too."
     )]
     async fn people_delete_contact_group(
@@ -329,6 +365,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "people_modify_contact_group_members",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Add or remove contacts from a group (apply or strip a label). Pass contact resource names or bare IDs in `add` / `remove`, max 1000 per call."
     )]
     async fn people_modify_contact_group_members(

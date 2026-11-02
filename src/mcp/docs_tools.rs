@@ -21,6 +21,11 @@ use crate::mcp::server::GoogleMcp;
 impl GoogleMcp {
     #[tool(
         name = "docs_create",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a new Google Doc with the given title. Returns the document resource (including its `documentId`). The doc starts empty — populate content via docs_append_text, docs_insert_text, or docs_batch_update."
     )]
     async fn docs_create(
@@ -39,6 +44,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "docs_get",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get a Google Doc's full structured payload (paragraphs, runs, lists, tables, headers, footers, styles). Heavy. For agents that just need to read content, prefer docs_get_text."
     )]
     async fn docs_get(
@@ -56,6 +62,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "docs_get_text",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch a Google Doc and return its body content as flattened plain text. Walks paragraphs, runs, and tables; lists and headings are inlined without markup. Returns `{ documentId, title, text, revisionId }`."
     )]
     async fn docs_get_text(
@@ -82,6 +89,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "docs_append_text",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Append plain text to the end of a Google Doc. Use `\\n` for line breaks. Wraps a `batchUpdate` with `insertText { endOfSegmentLocation: {} }`."
     )]
     async fn docs_append_text(
@@ -110,6 +122,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "docs_insert_text",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Insert plain text at a specific character index (0 = before everything; 1 = the typical 'start of body' position, just after the leading section break). Wraps `batchUpdate` with `insertText { location: { index } }`."
     )]
     async fn docs_insert_text(
@@ -138,6 +155,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "docs_replace_text",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Find every occurrence of `find` in the doc and replace with `replace`. `match_case` defaults to false (case-insensitive). Wraps `batchUpdate` with a single `replaceAllText` request. Returns Google's report including `occurrencesChanged`."
     )]
     async fn docs_replace_text(
@@ -168,6 +190,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "docs_batch_update",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Power-user: pass a raw `batchUpdate` body with any combination of requests (insertText, deleteContentRange, replaceAllText, updateTextStyle, updateParagraphStyle, createNamedRange, insertTable, insertSectionBreak, etc.). Body: `{\"requests\":[{...}],\"writeControl\":{...}?}`. See https://developers.google.com/docs/api/reference/rest/v1/documents/request"
     )]
     async fn docs_batch_update(
@@ -189,6 +216,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "docs_insert_styled",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Insert text with optional text styling (bold/italic/underline/strikethrough/font size/font family/colors/link/baseline) and optional paragraph styling (HEADING_1…6, TITLE, SUBTITLE, NORMAL_TEXT). Omit `at_index` to append at the end of the body. Returns the inserted range so chained operations can keep going. Indexes count UTF-16 code units."
     )]
     async fn docs_insert_styled(
@@ -274,6 +306,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "docs_format_text",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Apply text and/or paragraph styling. Pass EITHER `range: {start_index, end_index}` for an exact range OR `match: \"...\"` to style every occurrence (case-insensitive by default; set `match_case=true` for exact). At least one of `text_style` / `paragraph_style` must be provided. Returns the list of ranges actually styled. Note: matches that span multiple textRun boundaries (style edges) are not detected; split your search if needed."
     )]
     async fn docs_format_text(
@@ -385,6 +422,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "docs_make_list",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Convert paragraphs in a range to a bulleted or numbered list. Pass `style: \"bullet\"` (default) or `\"numbered\"`, or override directly with `bullet_preset` (e.g. `BULLET_DISC_CIRCLE_SQUARE`, `BULLET_CHECKBOX`, `NUMBERED_DECIMAL_NESTED`). The range should cover the paragraph(s) you want to listify; Docs applies the bullets at paragraph granularity."
     )]
     async fn docs_make_list(
@@ -437,6 +479,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "docs_insert_table",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Insert an empty table at `at_index` (omit for end of body) with `rows` × `columns` cells. Returns the requested position. Populate cells via subsequent `docs_insert_text` calls (cell start indexes can be discovered by calling `docs_get` after the table is in place — look at `body.content[].table.tableRows[].tableCells[].startIndex`)."
     )]
     async fn docs_insert_table(
@@ -482,6 +529,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "docs_insert_image",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = true
+        ),
         description = "Insert an inline image from a public HTTPS URL at `at_index` (omit for end of body). Optional `width_pt` / `height_pt` set the rendered size in points; omit to use the image's natural size. Constraints: PNG / JPEG / GIF only, max 50 MB, max 25 megapixels. The URL must be publicly reachable from Google's servers (Drive image URLs work if the file is shared widely)."
     )]
     async fn docs_insert_image(
