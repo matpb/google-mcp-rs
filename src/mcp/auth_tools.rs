@@ -15,6 +15,11 @@ use crate::state::Tenancy;
 impl GoogleMcp {
     #[tool(
         name = "google_authenticate",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Connect your Google account to this server. Opens a browser window for Google sign-in; approve the requested Google Workspace access, then return here. You only need to do this once — the connection is remembered."
     )]
     async fn google_authenticate(&self) -> Result<CallToolResult, ErrorData> {

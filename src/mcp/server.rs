@@ -242,7 +242,7 @@ mod harness {
     /// continue to mean something.
     pub(crate) fn expected_count(d: Domain) -> usize {
         match d {
-            Domain::Gmail => 28,
+            Domain::Gmail => 29,
             Domain::Sheets => 11,
             Domain::Drive => 14,
             Domain::Docs => 12,
@@ -448,6 +448,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gmail_get_signature_registered_for_gmail() {
+        let mcp = make_mcp(vec![Domain::Gmail]).await;
+        assert!(tool_names(&mcp).contains(&"gmail_get_signature".to_string()));
+    }
+
+    #[tokio::test]
     async fn gmail_filter_tools_registered_and_action_schema_is_closed() {
         let mcp = make_mcp(vec![Domain::Gmail]).await;
         let tools = mcp.tool_router.list_all();
@@ -481,6 +487,60 @@ mod tests {
         assert_eq!(keys, vec!["add_label_ids", "remove_label_ids"]);
         assert_eq!(action["additionalProperties"], serde_json::json!(false));
         assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn every_tool_declares_its_effects() {
+        let every_domain = Domain::ALL.into_iter().chain(Domain::OPT_IN).collect();
+        let full = make_mcp_with_jail(every_domain, crate::files::FileMaintenance::Full).await;
+        let mut tools = full.tool_router.list_all();
+        tools.extend(
+            make_mcp_single(vec![Domain::Gmail])
+                .await
+                .tool_router
+                .list_all()
+                .into_iter()
+                .filter(|t| t.name == "google_authenticate"),
+        );
+        let hint = |name: &str| {
+            let t = tools.iter().find(|t| t.name == name).expect(name);
+            let a = t.annotations.as_ref().expect("annotations");
+            (a.read_only_hint, a.destructive_hint, a.open_world_hint)
+        };
+        for t in &tools {
+            let a = t
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} has no annotations", t.name));
+            assert!(a.read_only_hint.is_some(), "{}: read_only_hint", t.name);
+            assert!(a.open_world_hint.is_some(), "{}: open_world_hint", t.name);
+            // Clients treat a write without destructive_hint as destructive; say it either way.
+            assert_eq!(
+                a.read_only_hint == Some(false),
+                a.destructive_hint.is_some(),
+                "{}: destructive_hint is set exactly on writes",
+                t.name
+            );
+        }
+        assert_eq!(
+            hint("gmail_search_threads"),
+            (Some(true), None, Some(false))
+        );
+        assert_eq!(
+            hint("gmail_create_draft"),
+            (Some(false), Some(false), Some(false))
+        );
+        // Sending can't be undone and reaches other people.
+        assert_eq!(hint("gmail_send"), (Some(false), Some(true), Some(true)));
+        assert_eq!(
+            hint("drive_share_file"),
+            (Some(false), Some(true), Some(true))
+        );
+        assert_eq!(
+            hint("drive_delete_permanent"),
+            (Some(false), Some(true), Some(false))
+        );
+        assert_eq!(hint("health_rollup"), (Some(true), None, Some(false)));
     }
 
     #[tokio::test]

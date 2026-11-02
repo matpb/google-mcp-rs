@@ -21,6 +21,7 @@ const MAX_ROW_LIMIT: u32 = 25000;
 impl GoogleMcp {
     #[tool(
         name = "searchconsole_list_sites",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List the Search Console properties this account can access. Returns `{ siteEntry: [{siteUrl, permissionLevel}] }`. Pass `siteUrl` verbatim as `site_url` to every other searchconsole_* tool. `permissionLevel` is one of siteOwner, siteFullUser, siteRestrictedUser, siteUnverifiedUser."
     )]
     async fn searchconsole_list_sites(
@@ -38,6 +39,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "searchconsole_get_site",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get one property's `siteUrl` and `permissionLevel`."
     )]
     async fn searchconsole_get_site(
@@ -56,6 +58,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "searchconsole_list_sitemaps",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List the sitemaps submitted for a property. Returns `{ sitemap: [{path, lastSubmitted, lastDownloaded, isPending, isSitemapsIndex, type, warnings, errors, contents: [{type, submitted, indexed}]}] }`."
     )]
     async fn searchconsole_list_sitemaps(
@@ -74,6 +77,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "searchconsole_get_sitemap",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get one submitted sitemap's status, warnings, errors and per-type submitted/indexed counts."
     )]
     async fn searchconsole_get_sitemap(
@@ -93,6 +97,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "searchconsole_submit_sitemap",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Submit a sitemap URL to a property, or resubmit an existing one to ask Google to fetch it again. Needs owner or full-user permission on the property. Returns `{ submitted: feedpath }`."
     )]
     async fn searchconsole_submit_sitemap(
@@ -112,6 +121,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "searchconsole_delete_sitemap",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Remove a sitemap from a property. Google stops using it immediately and there is no undo; resubmit it with `searchconsole_submit_sitemap` to add it back. Returns `{ deleted: feedpath }`."
     )]
     async fn searchconsole_delete_sitemap(
@@ -132,6 +146,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "searchconsole_query_analytics",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Query search performance (clicks, impressions, ctr, position) for a property over an inclusive date range, grouped by `dimensions`. Returns `{ rows: [{keys, clicks, impressions, ctr, position}], responseAggregationType }`; `keys` follow the order of `dimensions`. Use `filters` to narrow to one page, query, country or device. `data_state=final` (default) excludes the most recent days that are still being finalized. Max 25000 rows per call; page with `start_row`."
     )]
     async fn searchconsole_query_analytics(
@@ -223,6 +238,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "searchconsole_inspect_url",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Inspect one URL's Google index status: verdict, coverage state, last crawl time, Google-selected canonical, robots and indexing state, plus rich results when present. Returns `{ inspectionResult: {inspectionResultLink, indexStatusResult, richResultsResult, ...} }`. `inspection_url` must belong to `site_url`."
     )]
     async fn searchconsole_inspect_url(

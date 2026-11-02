@@ -18,6 +18,11 @@ use crate::mcp::server::GoogleMcp;
 impl GoogleMcp {
     #[tool(
         name = "sheets_create",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a new spreadsheet. Optionally seed it with named sheet tabs and a locale/time zone. Returns the new spreadsheet's full resource (including its `spreadsheetId`)."
     )]
     async fn sheets_create(
@@ -51,6 +56,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "sheets_get",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get a spreadsheet's metadata (or a specific A1 range with cell data). Pass `include_grid_data=true` for cell-level detail; otherwise you get titles, sheet IDs, and properties — much smaller."
     )]
     async fn sheets_get(
@@ -73,6 +79,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "sheets_get_values",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Read values from an A1 range (e.g. `Sheet1!A1:C10` or just `Sheet1` for the whole tab). Returns `{ range, majorDimension, values: [[...]] }`."
     )]
     async fn sheets_get_values(
@@ -96,6 +103,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "sheets_batch_get_values",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Read values from multiple A1 ranges in a single API call. Returns `{ valueRanges: [{range, values}, ...] }`."
     )]
     async fn sheets_batch_get_values(
@@ -118,6 +126,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "sheets_update_values",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Write a 2-D array of values into an A1 range. `value_input_option=USER_ENTERED` parses formulas/dates the way the Sheets UI does; `RAW` (default) stores values verbatim."
     )]
     async fn sheets_update_values(
@@ -144,6 +157,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "sheets_append_values",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Append rows to a table-shaped range. Sheets locates the bottom of the table within the supplied range and writes underneath. `insert_data_option=INSERT_ROWS` pushes existing rows down; `OVERWRITE` (default) replaces them."
     )]
     async fn sheets_append_values(
@@ -170,6 +188,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "sheets_clear_values",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Clear all values from an A1 range (formatting is preserved)."
     )]
     async fn sheets_clear_values(
@@ -187,6 +210,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "sheets_batch_update_values",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Write multiple ranges in one API call. Body: `{\"valueInputOption\":\"USER_ENTERED|RAW\",\"data\":[{\"range\":\"...\",\"values\":[[...]]}]}`."
     )]
     async fn sheets_batch_update_values(
@@ -204,6 +232,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "sheets_batch_update",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Schema-level batch update: add/delete sheets, update cell formatting, conditional formatting, charts, banding, named ranges, etc. Body: `{\"requests\":[{\"addSheet\":{...}},{\"updateCells\":{...}},...],\"includeSpreadsheetInResponse\":bool}`. See https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/request for the full request type catalog."
     )]
     async fn sheets_batch_update(
@@ -221,6 +254,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "sheets_add_sheet",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Convenience: add a new tab (sheet) to an existing spreadsheet. Wraps `sheets_batch_update` with a single `addSheet` request."
     )]
     async fn sheets_add_sheet(
@@ -255,6 +293,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "sheets_delete_sheet",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Convenience: remove a tab from a spreadsheet by its numeric `sheet_id` (NOT its title — get IDs from `sheets_get`'s `sheets[].properties.sheetId`)."
     )]
     async fn sheets_delete_sheet(

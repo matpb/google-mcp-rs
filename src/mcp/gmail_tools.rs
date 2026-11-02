@@ -18,6 +18,7 @@ use crate::google::gmail::{
 use crate::mcp::common;
 use crate::mcp::params::*;
 use crate::mcp::server::GoogleMcp;
+use crate::mime::signature::{apply_signature, html_to_text, pick_send_as};
 use crate::mime::{AttachmentInput, AttachmentSource, Compose, ReplyContext, ResolvedAttachment};
 
 #[tool_router(router = gmail_router, vis = "pub(crate)")]
@@ -28,6 +29,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_profile",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Return the connected Google account's email, the granted scopes, and Gmail's idea of total counts (messagesTotal, threadsTotal, historyId). Useful for confirming which mailbox the JWT is bound to."
     )]
     async fn gmail_get_profile(
@@ -51,6 +53,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_search_threads",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Search threads with Gmail query syntax (e.g. `from:foo is:unread newer_than:7d`). Returns a list of thread IDs and a nextPageToken cursor when there are more."
     )]
     async fn gmail_search_threads(
@@ -73,6 +76,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_thread",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch a thread with all its messages. Default `format=full` returns parsed payload (headers + decoded body parts). Use `metadata` to skip bodies, `raw` for the source RFC 5322."
     )]
     async fn gmail_get_thread(
@@ -90,6 +94,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_thread_url",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Build the Gmail web UI URL for a thread, scoped to the connected account so it routes correctly even when the user is signed into multiple Google accounts in the browser."
     )]
     async fn gmail_get_thread_url(
@@ -116,6 +121,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_list_messages",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List messages, optionally filtered by Gmail query syntax. Returns IDs + thread IDs + nextPageToken."
     )]
     async fn gmail_list_messages(
@@ -139,6 +145,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_message",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch a single message. Default `format=full` returns parsed payload. Pass `metadata_headers` (e.g. [\"Subject\",\"From\"]) with `format=metadata` to fetch only specific headers cheaply."
     )]
     async fn gmail_get_message(
@@ -160,6 +167,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_list_attachments",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Walk a message's MIME tree and return a flat list of attachment descriptors {filename, mimeType, attachmentId, size}. Inline parts (with `Content-Disposition: inline`) are NOT included unless they have a filename."
     )]
     async fn gmail_list_attachments(
@@ -181,6 +189,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_download_attachment",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Download an attachment by message + attachment ID. Preferred: set `dest_path` (inside FILE_ROOT) to write bytes to disk, or `to_drive_folder_id` to push straight into Drive — neither routes bytes through the model's context. Without either, returns `{ size, data }` where `data` is base64url (capped when a file-exchange dir is available)."
     )]
     async fn gmail_download_attachment(
@@ -286,6 +299,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_list_drafts",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List drafts. Optional Gmail query (`q`) filters by content/recipient/etc."
     )]
     async fn gmail_list_drafts(
@@ -303,6 +317,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_draft",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch a draft by ID, including its underlying message."
     )]
     async fn gmail_get_draft(
@@ -320,7 +335,12 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_create_draft",
-        description = "Create a draft. Set `reply_to_message_id` to thread the draft as a reply (the tool fetches the original's Message-Id/References/Subject and threadId automatically)."
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
+        description = "Create a draft. Set `reply_to_message_id` to thread the draft as a reply (the tool fetches the original's Message-Id/References/Subject and threadId automatically). Set `append_signature: true` to add the sender's Gmail signature (the API never adds it on its own)."
     )]
     async fn gmail_create_draft(
         &self,
@@ -329,7 +349,7 @@ impl GoogleMcp {
     ) -> Result<String, ErrorData> {
         let session = self.resolve_session(&parts).await?;
         let client = GmailClient::new((*self.state.http).clone(), &session.access_token);
-        let (raw, thread_id) = build_outgoing_message(
+        let (raw, thread_id, signature) = build_outgoing_message(
             &client,
             (*self.state.http).clone(),
             &session.access_token,
@@ -342,12 +362,17 @@ impl GoogleMcp {
             .create_draft(&raw, thread_id.as_deref())
             .await
             .map_err(to_mcp)?;
-        Ok(v.to_string())
+        Ok(with_signature_note(v, signature).to_string())
     }
 
     #[tool(
         name = "gmail_update_draft",
-        description = "Replace the contents of an existing draft. Same compose surface as gmail_send."
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
+        description = "Replace the contents of an existing draft. Same compose surface as gmail_send. Set `append_signature: true` to add the sender's Gmail signature (the API never adds it on its own)."
     )]
     async fn gmail_update_draft(
         &self,
@@ -356,7 +381,7 @@ impl GoogleMcp {
     ) -> Result<String, ErrorData> {
         let session = self.resolve_session(&parts).await?;
         let client = GmailClient::new((*self.state.http).clone(), &session.access_token);
-        let (raw, thread_id) = build_outgoing_message(
+        let (raw, thread_id, signature) = build_outgoing_message(
             &client,
             (*self.state.http).clone(),
             &session.access_token,
@@ -369,11 +394,16 @@ impl GoogleMcp {
             .update_draft(&p.id, &raw, thread_id.as_deref())
             .await
             .map_err(to_mcp)?;
-        Ok(v.to_string())
+        Ok(with_signature_note(v, signature).to_string())
     }
 
     #[tool(
         name = "gmail_delete_draft",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Delete a draft permanently."
     )]
     async fn gmail_delete_draft(
@@ -388,6 +418,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_send_draft",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        ),
         description = "Send a previously created draft."
     )]
     async fn gmail_send_draft(
@@ -406,7 +441,12 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_send",
-        description = "Send an email. Set `reply_to_message_id` to send as a threaded reply (In-Reply-To/References/Subject + threadId are wired automatically). Set `attachments` to add files (base64 inline or absolute server path; 24 MB total cap). NOTE: this sends immediately — route to gmail_create_draft when you want explicit human approval first."
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        ),
+        description = "Send an email. Set `reply_to_message_id` to send as a threaded reply (In-Reply-To/References/Subject + threadId are wired automatically). Set `attachments` to add files (base64 inline or absolute server path; 24 MB total cap). NOTE: this sends immediately — route to gmail_create_draft when you want explicit human approval first. Set `append_signature: true` to add the sender's Gmail signature (the API never adds it on its own)."
     )]
     async fn gmail_send(
         &self,
@@ -415,7 +455,7 @@ impl GoogleMcp {
     ) -> Result<String, ErrorData> {
         let session = self.resolve_session(&parts).await?;
         let client = GmailClient::new((*self.state.http).clone(), &session.access_token);
-        let (raw, thread_id) = build_outgoing_message(
+        let (raw, thread_id, signature) = build_outgoing_message(
             &client,
             (*self.state.http).clone(),
             &session.access_token,
@@ -428,7 +468,7 @@ impl GoogleMcp {
             .send_message(&raw, thread_id.as_deref())
             .await
             .map_err(to_mcp)?;
-        Ok(v.to_string())
+        Ok(with_signature_note(v, signature).to_string())
     }
 
     // -----------------------------------------------------------------
@@ -437,6 +477,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_list_labels",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List all labels in the mailbox (system + user-created)."
     )]
     async fn gmail_list_labels(
@@ -450,6 +491,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_get_label",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch a label by ID, including message/thread totals and color."
     )]
     async fn gmail_get_label(
@@ -464,6 +506,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_create_label",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a new label. Optional `color` uses Gmail's restricted palette (see https://developers.google.com/gmail/api/reference/rest/v1/users.labels#color)."
     )]
     async fn gmail_create_label(
@@ -484,6 +531,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_update_label",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Rename a label or change its color/visibility. Pass only the fields you want to update."
     )]
     async fn gmail_update_label(
@@ -504,6 +556,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_delete_label",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Delete a label. The label is removed from any messages it was applied to."
     )]
     async fn gmail_delete_label(
@@ -522,6 +579,7 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_list_filters",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List every Gmail filter with its id, criteria and action. Needs the gmail.settings.basic scope: a connection authorized before filter support returns auth_required and must be re-authorized."
     )]
     async fn gmail_list_filters(
@@ -538,6 +596,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_create_filter",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Create a Gmail filter for incoming mail (it does not touch existing messages). `criteria` needs at least one field, `action` at least one label change. Actions are label edits only: user label IDs from gmail_list_labels plus system IDs (remove INBOX = skip inbox, remove UNREAD = mark read, add STARRED, add/remove IMPORTANT, add TRASH = delete, remove SPAM = never spam). Forwarding is deliberately unsupported. Gmail has no filter update: to edit one, gmail_delete_filter it and create the replacement. Returns the created filter."
     )]
     async fn gmail_create_filter(
@@ -553,6 +616,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_delete_filter",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Delete a Gmail filter by ID (from gmail_list_filters). Messages it already labeled stay as they are."
     )]
     async fn gmail_delete_filter(
@@ -568,12 +636,36 @@ impl GoogleMcp {
         Ok(v.to_string())
     }
 
+    #[tool(
+        name = "gmail_get_signature",
+        annotations(read_only_hint = true, open_world_hint = false),
+        description = "Read the Gmail signature for a send-as address (default: the account's default send-as). Returns the signature HTML and a plain-text rendering. Read-only."
+    )]
+    async fn gmail_get_signature(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<GmailGetSignatureParams>,
+    ) -> Result<String, ErrorData> {
+        let client = self.gmail_for(&parts).await?;
+        let list = client.list_send_as().await.map_err(to_mcp)?;
+        let wanted = p.send_as_email.as_deref();
+        let Some(entry) = pick_send_as(&list, wanted) else {
+            return Err(send_as_not_found(&list, wanted).into());
+        };
+        Ok(signature_info(entry).to_string())
+    }
+
     // -----------------------------------------------------------------
     // Organize
     // -----------------------------------------------------------------
 
     #[tool(
         name = "gmail_modify_labels",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Add/remove label IDs on a single message OR thread. Pass `target=\"message\"` or `target=\"thread\"` and the corresponding ID. At least one of `add_label_ids` / `remove_label_ids` must be non-empty."
     )]
     async fn gmail_modify_labels(
@@ -603,6 +695,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_mark_read",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Remove the UNREAD label from one or more messages or threads."
     )]
     async fn gmail_mark_read(
@@ -623,6 +720,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_mark_unread",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Add the UNREAD label to one or more messages or threads."
     )]
     async fn gmail_mark_unread(
@@ -643,6 +745,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_archive",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
         description = "Remove the INBOX label from one or more messages or threads (archives them)."
     )]
     async fn gmail_archive(
@@ -663,6 +770,11 @@ impl GoogleMcp {
 
     #[tool(
         name = "gmail_trash",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        ),
         description = "Move one or more messages or threads to Trash. Reversible from Gmail's UI for ~30 days."
     )]
     async fn gmail_trash(
@@ -794,17 +906,16 @@ async fn find_attachment_meta(
     (None, None)
 }
 
-/// Build the outgoing RFC 5322 message + threadId for send/draft tools.
-/// When `reply_to_message_id` is set, fetches the original's headers to
-/// build a properly threaded reply.
+/// Build the outgoing RFC 5322 message, threadId and signature note for send/draft tools.
+/// Fetches the original's headers when `reply_to_message_id` is set.
 async fn build_outgoing_message(
     client: &GmailClient,
     http: reqwest::Client,
     access_token: &str,
     jail: Option<&FileJail>,
     from_email: &str,
-    p: GmailComposeParams,
-) -> Result<(String, Option<String>), ErrorData> {
+    mut p: GmailComposeParams,
+) -> Result<(String, Option<String>, Option<Value>), ErrorData> {
     if p.body_text.as_deref().unwrap_or("").is_empty()
         && p.body_html.as_deref().unwrap_or("").is_empty()
     {
@@ -814,6 +925,18 @@ async fn build_outgoing_message(
         .with_hint("Empty messages are valid RFC 5322 but rarely useful — supply text and/or HTML.")
         .into());
     }
+    let signature = if p.append_signature {
+        let list = client.list_send_as().await.map_err(to_mcp)?;
+        let (sig, note) = plan_signature(&list, from_email);
+        if let Some(sig) = sig {
+            let (text, html) = apply_signature(p.body_text.take(), p.body_html.take(), &sig);
+            p.body_text = text;
+            p.body_html = html;
+        }
+        Some(note)
+    } else {
+        None
+    };
     let mut reply: Option<ReplyContext> = None;
     let mut thread_id = p.thread_id.clone();
 
@@ -903,7 +1026,85 @@ async fn build_outgoing_message(
         reply,
     };
     let raw = crate::mime::compose_for_gmail(compose_req).map_err(to_mcp)?;
-    Ok((raw, thread_id))
+    Ok((raw, thread_id, signature))
+}
+
+/// Signature to apply for `from_email` (if any), and the `signature` note for the result.
+fn plan_signature(list: &Value, from_email: &str) -> (Option<String>, Value) {
+    let entry = pick_send_as(list, Some(from_email));
+    let signature = entry
+        .and_then(|e| e.get("signature"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty());
+    match (entry, signature) {
+        (None, _) => (
+            None,
+            json!({
+                "appended": false,
+                "send_as_email": from_email,
+                "reason": "send-as address not found in Gmail settings",
+            }),
+        ),
+        (Some(_), None) => (
+            None,
+            json!({
+                "appended": false,
+                "send_as_email": from_email,
+                "reason": "no signature configured for this send-as address",
+            }),
+        ),
+        (Some(_), Some(sig)) => (
+            Some(sig.to_string()),
+            json!({"appended": true, "send_as_email": from_email}),
+        ),
+    }
+}
+
+/// Add the `signature` note to an object API result; other results pass through.
+fn with_signature_note(mut v: Value, note: Option<Value>) -> Value {
+    if let (Some(note), Some(obj)) = (note, v.as_object_mut()) {
+        obj.insert("signature".to_string(), note);
+    }
+    v
+}
+
+/// Shape one sendAs entry as the `gmail_get_signature` result.
+fn signature_info(entry: &Value) -> Value {
+    let text = |key: &str| entry.get(key).and_then(Value::as_str).unwrap_or("");
+    let flag = |key: &str| entry.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let signature = text("signature");
+    json!({
+        "send_as_email": text("sendAsEmail"),
+        "display_name": text("displayName"),
+        "is_default": flag("isDefault"),
+        "is_primary": flag("isPrimary"),
+        "has_signature": !signature.trim().is_empty(),
+        "signature_html": signature,
+        "signature_text": html_to_text(signature),
+    })
+}
+
+/// Error for a `pick_send_as` miss: an unknown address, or an account with no sendAs entries.
+fn send_as_not_found(list: &Value, wanted: Option<&str>) -> McpError {
+    let available: Vec<&str> = list
+        .get("sendAs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.get("sendAsEmail").and_then(Value::as_str))
+        .collect();
+    let hint = if available.is_empty() {
+        "Gmail returned no send-as addresses for this account.".to_string()
+    } else {
+        format!("Available send-as addresses: {}", available.join(", "))
+    };
+    match wanted {
+        Some(email) => {
+            McpError::invalid_input(format!("no send-as address {email} on this account"))
+                .with_hint(hint)
+        }
+        None => McpError::internal(hint),
+    }
 }
 
 /// Resolve one attachment's bytes from its (single) source. Local paths go
@@ -1254,5 +1455,146 @@ mod filter_tests {
         .unwrap();
         let filter = build_filter(p).unwrap();
         assert_eq!(filter.criteria.size, Some(1_000_000));
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+    use crate::errors::Category;
+
+    fn send_as_list() -> Value {
+        json!({"sendAs": [
+            {
+                "sendAsEmail": "me@example.com",
+                "displayName": "Me",
+                "isDefault": true,
+                "isPrimary": true,
+                "signature": "<div>Me &amp; Co</div>"
+            },
+            {
+                "sendAsEmail": "alias@example.com",
+                "isDefault": false,
+                "isPrimary": false,
+                "signature": "   "
+            }
+        ]})
+    }
+
+    #[test]
+    fn signature_info_renders_full_entry() {
+        let entry = &send_as_list()["sendAs"][0];
+        assert_eq!(
+            signature_info(entry),
+            json!({
+                "send_as_email": "me@example.com",
+                "display_name": "Me",
+                "is_default": true,
+                "is_primary": true,
+                "has_signature": true,
+                "signature_html": "<div>Me &amp; Co</div>",
+                "signature_text": "Me & Co"
+            })
+        );
+    }
+
+    #[test]
+    fn signature_info_absent_fields_are_empty() {
+        let entry = json!({"sendAsEmail": "x@example.com"});
+        assert_eq!(
+            signature_info(&entry),
+            json!({
+                "send_as_email": "x@example.com",
+                "display_name": "",
+                "is_default": false,
+                "is_primary": false,
+                "has_signature": false,
+                "signature_html": "",
+                "signature_text": ""
+            })
+        );
+    }
+
+    #[test]
+    fn signature_info_blank_signature_has_none() {
+        let info = signature_info(&send_as_list()["sendAs"][1]);
+        assert_eq!(info["has_signature"], json!(false));
+        assert_eq!(info["signature_text"], json!(""));
+    }
+
+    #[test]
+    fn plan_signature_applies_configured_signature() {
+        let (sig, note) = plan_signature(&send_as_list(), "me@example.com");
+        assert_eq!(sig.as_deref(), Some("<div>Me &amp; Co</div>"));
+        assert_eq!(
+            note,
+            json!({"appended": true, "send_as_email": "me@example.com"})
+        );
+    }
+
+    #[test]
+    fn plan_signature_reports_blank_signature_as_not_applied() {
+        let (sig, note) = plan_signature(&send_as_list(), "alias@example.com");
+        assert_eq!(sig, None);
+        assert_eq!(
+            note,
+            json!({
+                "appended": false,
+                "send_as_email": "alias@example.com",
+                "reason": "no signature configured for this send-as address"
+            })
+        );
+    }
+
+    #[test]
+    fn plan_signature_reports_unknown_address_as_not_applied() {
+        let (sig, note) = plan_signature(&send_as_list(), "nobody@example.com");
+        assert_eq!(sig, None);
+        assert_eq!(
+            note,
+            json!({
+                "appended": false,
+                "send_as_email": "nobody@example.com",
+                "reason": "send-as address not found in Gmail settings"
+            })
+        );
+    }
+
+    #[test]
+    fn with_signature_note_adds_key_to_objects_only() {
+        let note = Some(json!({"appended": false}));
+        assert_eq!(
+            with_signature_note(json!({"id": "1"}), note.clone()),
+            json!({"id": "1", "signature": {"appended": false}})
+        );
+        assert_eq!(
+            with_signature_note(json!({"id": "1"}), None),
+            json!({"id": "1"})
+        );
+        assert_eq!(with_signature_note(json!(["a"]), note), json!(["a"]));
+    }
+
+    #[test]
+    fn send_as_not_found_lists_available_addresses() {
+        let err = send_as_not_found(&send_as_list(), Some("nobody@example.com"));
+        assert_eq!(err.category, Category::InvalidInput);
+        assert_eq!(
+            err.message,
+            "no send-as address nobody@example.com on this account"
+        );
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("Available send-as addresses: me@example.com, alias@example.com")
+        );
+    }
+
+    #[test]
+    fn send_as_not_found_on_empty_account_is_internal() {
+        let err = send_as_not_found(&json!({}), None);
+        assert_eq!(err.category, Category::Internal);
+        assert_eq!(
+            err.message,
+            "Gmail returned no send-as addresses for this account."
+        );
     }
 }

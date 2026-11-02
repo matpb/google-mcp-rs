@@ -7,17 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Added
 
-- `/oauth/token` supports the `refresh_token` grant. Access JWTs now live one
-  hour instead of 30 days and come with a rotating refresh token (30 days
-  idle). A refresh token is bound to its client, stored as a SHA-256 hash, and
-  refused after `accounts revoke` or a Google `invalid_grant`; reusing a
-  retired refresh token revokes its whole chain. MCP clients that ignore
-  refresh tokens now authorize again every hour instead of every 30 days.
-- Migration `003_refresh_tokens.sql` adds `mcp_refresh_tokens`. As before
-  002, an existing database is first backed up to
-  `<DATABASE_URL>.pre-003.bak`.
+- MCP tool annotations on every tool (`readOnlyHint`, `destructiveHint`,
+  `openWorldHint`), so clients can confirm sends, shares and deletes while
+  letting reads through. `gmail_send`, `gmail_send_draft` and
+  `drive_share_file` are marked destructive: they cannot be undone.
+  Calendar event writes are open-world, since `send_updates` can email
+  guests, and `calendar_create_event`, `calendar_quick_add_event` and
+  `gmail_create_filter` (which can trash future mail) are destructive.
+
+## [1.2.0] - 2026-11-02
+
+### Added
+
+- `gmail_get_signature` (read-only) returns the Gmail signature for a send-as
+  address, as HTML and as plain text. Defaults to the account's default
+  send-as address.
+- `append_signature` on `gmail_create_draft`, `gmail_update_draft` and
+  `gmail_send` appends the sender's Gmail signature, since the API never adds
+  it on its own. Default `false`: no behaviour change unless it is set.
+- No new OAuth scope: sendAs reads accept gmail.modify.
 
 ## [1.1.0] - 2026-10-23
 
