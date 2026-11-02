@@ -171,8 +171,8 @@ impl GoogleMcp {
         name = "calendar_create_event",
         annotations(
             read_only_hint = false,
-            destructive_hint = false,
-            open_world_hint = false
+            destructive_hint = true,
+            open_world_hint = true
         ),
         description = "Create an event. Pass timed events with `start_date_time` + `end_date_time` (RFC3339), all-day events with `start_date` + `end_date` (YYYY-MM-DD; end is exclusive). For recurring events also pass `recurrence` (RRULE strings) and `time_zone`. Set `add_conference=true` to attach a Google Meet link. `send_updates` controls whether attendees are emailed (default `none`)."
     )]
@@ -207,8 +207,8 @@ impl GoogleMcp {
         name = "calendar_quick_add_event",
         annotations(
             read_only_hint = false,
-            destructive_hint = false,
-            open_world_hint = false
+            destructive_hint = true,
+            open_world_hint = true
         ),
         description = "Create an event from a single natural-language string, e.g. `Lunch with Sara tomorrow at 1pm`. Google's parser is the same as the one in the Calendar UI's quick-add bar. Returns the parsed Event resource."
     )]
@@ -235,7 +235,7 @@ impl GoogleMcp {
         annotations(
             read_only_hint = false,
             destructive_hint = true,
-            open_world_hint = false
+            open_world_hint = true
         ),
         description = "Partially update an event. Only the fields you set are touched. **Note**: setting `attendees` REPLACES the list — fetch the event first if you need to add or remove a single attendee. `send_updates` controls invite emails."
     )]
@@ -279,7 +279,7 @@ impl GoogleMcp {
         annotations(
             read_only_hint = false,
             destructive_hint = true,
-            open_world_hint = false
+            open_world_hint = true
         ),
         description = "Delete an event. **Irreversible** — for cancellations that should notify attendees, set `send_updates=\"all\"`."
     )]
@@ -303,7 +303,7 @@ impl GoogleMcp {
         annotations(
             read_only_hint = false,
             destructive_hint = false,
-            open_world_hint = false
+            open_world_hint = true
         ),
         description = "Move an event from one calendar to another (the user must have write access to both). Recurring events can only be moved as a whole series."
     )]
@@ -332,7 +332,7 @@ impl GoogleMcp {
         annotations(
             read_only_hint = false,
             destructive_hint = false,
-            open_world_hint = false
+            open_world_hint = true
         ),
         description = "Set the authenticated user's (or another attendee's) `responseStatus` on an event: `accepted`, `declined`, or `tentative`. Optionally include a comment shown to organisers. Requires the user to already be on the attendee list (otherwise Google rejects with 400)."
     )]

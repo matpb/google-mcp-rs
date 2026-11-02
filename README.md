@@ -4,13 +4,13 @@ A multi-tenant **Model Context Protocol** server for **Google Workspace**, writt
 
 It also runs in **single-tenant stdio mode** as a prebuilt binary that any local MCP client (Claude Code, Claude Desktop, Codex, Cursor) launches as a child process — no TLS certificate, no tunnel, no inbound network exposure.
 
-> **Status:** v1.1.0. Gmail (28) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **113 tools** by default, plus an opt-in, read-only **Google Health** domain (11 tools, 124 in total with it; see [Health](#health-11)), plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 114th tool, `google_authenticate`, handles in-chat sign-in.
+> **Status:** v1.2.0. Gmail (29) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **114 tools** by default, plus an opt-in, read-only **Google Health** domain (11 tools, 125 in total with it; see [Health](#health-11)), plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 115th tool, `google_authenticate`, handles in-chat sign-in.
 
 ## Why
 
 The first-party Google Workspace MCP server is missing fundamentals (you cannot send an email from it). Existing community servers are Python or single-tenant. `google-mcp-rs` aims to be the Rust server you actually want to deploy:
 
-- **Full Gmail / Sheets / Drive / Docs / Calendar / Tasks / Contacts / Search Console surface** — 113 tools covering email (search/threads/drafts/send/labels/filters/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence), Google Tasks (task lists + tasks CRUD, subtasks, reordering, completion, cross-list moves), Google Contacts (contact CRUD, prefix search, contact groups/labels and their membership), and Google Search Console (properties, sitemaps, search analytics, URL inspection).
+- **Full Gmail / Sheets / Drive / Docs / Calendar / Tasks / Contacts / Search Console surface** — 114 tools covering email (search/threads/drafts/send/labels/filters/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence), Google Tasks (task lists + tasks CRUD, subtasks, reordering, completion, cross-list moves), Google Contacts (contact CRUD, prefix search, contact groups/labels and their membership), and Google Search Console (properties, sitemaps, search analytics, URL inspection).
 - **Opt-in Google Health (Fitbit data), read-only**: 11 tools over the Google Health API v4beta: steps, heart rate, sleep, HRV, SpO2, exercise (with TCX export), weight and more, with raw reads, reconciled streams and windowed or per-day rollups. Not in the default set: enable it with `ENABLED_DOMAINS=default,health`.
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256, a consent screen, and per-account revocation.
@@ -254,16 +254,16 @@ Not read by `ServerConfig`, but honored elsewhere:
 
 ## Scoping the surface
 
-By default, the server exposes all 113 tools across the eight standard Workspace domains and asks Google for the matching scope set during consent. For deployments that only need part of the surface, set `ENABLED_DOMAINS` to a comma-separated subset:
+By default, the server exposes all 114 tools across the eight standard Workspace domains and asks Google for the matching scope set during consent. For deployments that only need part of the surface, set `ENABLED_DOMAINS` to a comma-separated subset:
 
 ```bash
-ENABLED_DOMAINS=gmail            # Gmail-only: 28 tools, gmail.modify + gmail.settings.basic scopes
-ENABLED_DOMAINS=gmail,calendar   # email + calendaring: 42 tools
+ENABLED_DOMAINS=gmail            # Gmail-only: 29 tools, gmail.modify + gmail.settings.basic scopes
+ENABLED_DOMAINS=gmail,calendar   # email + calendaring: 43 tools
 ENABLED_DOMAINS=docs,drive       # document workflow: 26 tools
 ENABLED_DOMAINS=calendar,tasks   # planning only: 27 tools
-ENABLED_DOMAINS=gmail,people     # email + address book: 41 tools
+ENABLED_DOMAINS=gmail,people     # email + address book: 42 tools
 ENABLED_DOMAINS=searchconsole   # SEO only: 8 tools, webmasters scope
-ENABLED_DOMAINS=default,health  # the standard eight plus Google Health: 124 tools, 9 extra read-only googlehealth.* scopes
+ENABLED_DOMAINS=default,health  # the standard eight plus Google Health: 125 tools, 9 extra read-only googlehealth.* scopes
 ENABLED_DOMAINS=health          # Health only: 11 tools
 ```
 
@@ -350,9 +350,9 @@ setfacl -m u:65532:rwx ~/Downloads
 
 ## Tools
 
-Every tool carries MCP tool annotations, so clients can ask before the risky ones: reads are `readOnlyHint: true`; writes say `destructiveHint: true` when they lose data, cannot be undone or reach other people (`gmail_send`, `gmail_send_draft`, `drive_share_file`, deletes, overwrites), and `destructiveHint: false` when they only add or are easily reversed (drafts, labels, new files). `openWorldHint: true` marks the tools that reach people or URLs outside the account.
+Every tool carries MCP tool annotations, so clients can ask before the risky ones: reads are `readOnlyHint: true`; writes say `destructiveHint: true` when they lose data, cannot be undone or reach other people (`gmail_send`, `gmail_send_draft`, `drive_share_file`, deletes, overwrites), and `destructiveHint: false` when they only add or are easily reversed (drafts, labels, new files). `openWorldHint: true` marks the tools that reach people or URLs outside the account, including every calendar event write, since `send_updates` can email guests.
 
-### Gmail (28)
+### Gmail (29)
 
 | Tool | Purpose |
 |---|---|
@@ -363,7 +363,7 @@ Every tool carries MCP tool annotations, so clients can ask before the risky one
 | `gmail_list_attachments` | List attachments on a message |
 | `gmail_download_attachment` | Download an attachment by ID (returns base64) |
 | `gmail_get_thread_url` | Build a Gmail web URL for a thread |
-| `gmail_create_draft` | Create a draft (optionally as a reply) |
+| `gmail_create_draft` | Create a draft (optionally as a reply; `append_signature: true` adds the sender's Gmail signature, which the API never adds on its own) |
 | `gmail_get_draft` | Get a draft by ID |
 | `gmail_list_drafts` | List drafts |
 | `gmail_update_draft` | Update an existing draft |
@@ -378,6 +378,7 @@ Every tool carries MCP tool annotations, so clients can ask before the risky one
 | `gmail_list_filters` | List every filter, with its criteria and actions |
 | `gmail_create_filter` | Create a filter (criteria: from/to/subject/query/negated_query/has_attachment/exclude_chats/size+size_comparison; action: add/remove label IDs only, no forwarding). Gmail has no filter update — edit means delete then create |
 | `gmail_delete_filter` | Delete a filter by ID |
+| `gmail_get_signature` | Read the Gmail signature for a send-as address (default: the default send-as), as HTML and plain text. Read-only |
 | `gmail_modify_labels` | Add/remove labels on a message OR thread |
 | `gmail_mark_read` | Mark messages as read |
 | `gmail_mark_unread` | Mark messages as unread |

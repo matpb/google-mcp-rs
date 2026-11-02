@@ -5,6 +5,8 @@
 //! produces the base64url-encoded payload Gmail's `users.messages.send`
 //! expects in `{ "raw": "..." }`.
 
+pub mod signature;
+
 use std::borrow::Cow;
 
 use base64::Engine;
