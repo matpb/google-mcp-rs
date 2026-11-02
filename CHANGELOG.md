@@ -7,8 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-02
+
+### Security
+
+These changes concern HTTP mode (`google-mcp http`) only; stdio mode issues no MCP tokens and is unaffected.
+
+- `/oauth/token` now enforces client authentication. Earlier versions issued a
+  `client_secret` to every registered client but accepted token requests
+  without it. The method a client registers with is now recorded and enforced:
+  `client_secret_basic` (the RFC 7591 default when omitted, now supported),
+  `client_secret_post`, or `none` for public clients, which receive no secret.
+  Other methods are refused with `invalid_client_metadata`.
+- The client is authenticated before its authorization code is consumed, so a
+  request with bad credentials can no longer burn a legitimate user's code.
+  A failed authentication is `401 invalid_client`, the same answer for an
+  unknown client and a wrong secret.
+- An authorization code presented by another client is refused with
+  `invalid_grant`, and a token request naming a different `resource` than the
+  authorization request is refused with `invalid_target`.
+- Token and registration responses carry `Cache-Control: no-store` and
+  `Pragma: no-cache`.
+
 ### Added
 
+- Rotating refresh tokens (`refresh_token` grant), based on a contribution by
+  tidusvn05 (#17). Each refresh returns a new pair inside one database transaction,
+  which retires the old refresh token. Replaying a retired token, or
+  presenting it from another client, revokes the whole chain (RFC 9700).
+  Refresh tokens are stored only as SHA-256 hashes, expire after 30 days
+  unused and 90 days after sign-in at the latest, and are refused after
+  `accounts revoke` or a Google `invalid_grant`.
+- `REFRESH_REUSE_GRACE_SECS` (default 10, `0` to disable): within this window
+  a just-retired refresh token returns the same successor again (kept
+  encrypted with `STORAGE_ENCRYPTION_KEY` until the window ends), so a lost
+  response or two concurrent refreshes neither force a new sign-in nor fork
+  the chain.
+- `ACCESS_TOKEN_LIFETIME_SECS` (default 3600, clamped to 60 to 2592000).
+- `docs/oauth-tokens.md`: the token lifecycle, client authentication and threat
+  model.
 - MCP tool annotations on every tool (`readOnlyHint`, `destructiveHint`,
   `openWorldHint`), so clients can confirm sends, shares and deletes while
   letting reads through. `gmail_send`, `gmail_send_draft` and
@@ -16,6 +53,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Calendar event writes are open-world, since `send_updates` can email
   guests, and `calendar_create_event`, `calendar_quick_add_event` and
   `gmail_create_filter` (which can trash future mail) are destructive.
+
+### Changed
+
+- MCP access JWTs live one hour instead of 30 days. Clients that do not use
+  refresh tokens now sign in again every hour. `/mcp` refuses tokens whose
+  lifetime exceeds `ACCESS_TOKEN_LIFETIME_SECS`, so the 30-day tokens of
+  earlier versions stop working and every HTTP-mode client signs in once
+  after upgrading.
+- Clients registered before this release have no recorded method and are
+  treated as public clients: a secret is optional, but checked when sent.
+  Re-register a client to get full enforcement.
+- Migrations `003_refresh_tokens.sql` and
+  `004_refresh_rotation_and_client_auth.sql`. As
+  before, an existing database is first copied to
+  `<DATABASE_URL>.pre-00N.bak`.
+
+### Fixed
+
+- Approving the HTTP-mode consent screen failed in Chrome with "origin not
+  allowed": its `Referrer-Policy: no-referrer` made the browser send
+  `Origin: null` on the consent form. The page now sends
+  `Referrer-Policy: same-origin`, which still keeps its URL from Google and
+  the client.
 
 ## [1.2.0] - 2026-11-02
 

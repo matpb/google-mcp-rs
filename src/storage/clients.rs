@@ -14,6 +14,34 @@ use crate::oauth::pkce::constant_time_eq;
 /// Refuse new DCR registrations once `mcp_clients` reaches this many rows.
 pub const MAX_MCP_CLIENTS: i64 = 10_000;
 
+/// How a client authenticates at the token endpoint (RFC 7591 `token_endpoint_auth_method`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientAuth {
+    None,
+    SecretPost,
+    SecretBasic,
+}
+
+impl ClientAuth {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClientAuth::None => "none",
+            ClientAuth::SecretPost => "client_secret_post",
+            ClientAuth::SecretBasic => "client_secret_basic",
+        }
+    }
+
+    /// Exact match only; anything else is `None`.
+    pub fn parse(s: &str) -> Option<ClientAuth> {
+        match s {
+            "none" => Some(ClientAuth::None),
+            "client_secret_post" => Some(ClientAuth::SecretPost),
+            "client_secret_basic" => Some(ClientAuth::SecretBasic),
+            _ => None,
+        }
+    }
+}
+
 /// Maps `mcp_clients` rows 1:1; some fields are set on read but not yet consumed by callers.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -24,13 +52,16 @@ pub struct McpClient {
     pub client_name: Option<String>,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
+    /// `None` is a row registered before the column existed (secret optional).
+    pub token_endpoint_auth_method: Option<ClientAuth>,
 }
 
 pub struct CreateClient {
     pub client_id: String,
-    pub client_secret: String,
+    pub client_secret: Option<String>,
     pub redirect_uris: Vec<String>,
     pub client_name: Option<String>,
+    pub auth_method: ClientAuth,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -59,6 +90,9 @@ fn hash_secret_argon2(secret: &str) -> Result<String, DbError> {
 
 /// `sha256$` hashes compare inline; Argon2 verify runs off the async runtime.
 pub async fn verify_secret(secret: &str, hash: &str) -> bool {
+    if hash.is_empty() {
+        return false;
+    }
     if let Some(hex) = hash.strip_prefix("sha256$") {
         let computed = sha256_hex(secret.as_bytes());
         return constant_time_eq(computed.as_bytes(), hex.as_bytes());
@@ -82,16 +116,28 @@ pub async fn count(db: &Db) -> Result<i64, DbError> {
 }
 
 pub async fn create(db: &Db, req: CreateClient) -> Result<(), DbError> {
-    let hash = hash_secret(&req.client_secret);
+    let hash = match (&req.client_secret, req.auth_method) {
+        (Some(secret), ClientAuth::SecretPost | ClientAuth::SecretBasic) => hash_secret(secret),
+        (None, ClientAuth::None) => String::new(),
+        _ => return Err(DbError::Invalid("client secret does not match auth method")),
+    };
+    let method = req.auth_method.as_str();
     let redirect_json = serde_json::to_string(&req.redirect_uris)
         .map_err(|_| DbError::Invalid("redirect_uris not JSON-serializable"))?;
     let now = now_secs();
     db.call(move |conn| {
         let n = conn.execute(
             "INSERT INTO mcp_clients
-                (client_id, client_secret_hash, redirect_uris, client_name, created_at, last_used_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
-            params![req.client_id, hash, redirect_json, req.client_name, now],
+                (client_id, client_secret_hash, redirect_uris, client_name, created_at, last_used_at, token_endpoint_auth_method)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
+            params![
+                req.client_id,
+                hash,
+                redirect_json,
+                req.client_name,
+                now,
+                method
+            ],
         );
         match n {
             Ok(_) => Ok(()),
@@ -110,22 +156,35 @@ pub async fn get(db: &Db, client_id: &str) -> Result<Option<McpClient>, DbError>
     let client_id = client_id.to_string();
     db.call(move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT client_id, client_secret_hash, redirect_uris, client_name, created_at, last_used_at
+            "SELECT client_id, client_secret_hash, redirect_uris, client_name, created_at, last_used_at, token_endpoint_auth_method
              FROM mcp_clients WHERE client_id = ?1",
         )?;
         let row = stmt.query_row([&client_id], |r| {
             let redirects: String = r.get(2)?;
-            Ok(McpClient {
-                client_id: r.get(0)?,
-                client_secret_hash: r.get(1)?,
-                redirect_uris: serde_json::from_str(&redirects).unwrap_or_default(),
-                client_name: r.get(3)?,
-                created_at: r.get(4)?,
-                last_used_at: r.get(5)?,
-            })
+            let method: Option<String> = r.get(6)?;
+            Ok((
+                McpClient {
+                    client_id: r.get(0)?,
+                    client_secret_hash: r.get(1)?,
+                    redirect_uris: serde_json::from_str(&redirects).unwrap_or_default(),
+                    client_name: r.get(3)?,
+                    created_at: r.get(4)?,
+                    last_used_at: r.get(5)?,
+                    token_endpoint_auth_method: None,
+                },
+                method,
+            ))
         });
         match row {
-            Ok(c) => Ok(Some(c)),
+            Ok((mut client, method)) => {
+                client.token_endpoint_auth_method = match method {
+                    None => None,
+                    Some(m) => Some(ClientAuth::parse(&m).ok_or(DbError::Invalid(
+                        "stored token_endpoint_auth_method is not recognised",
+                    ))?),
+                };
+                Ok(Some(client))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -199,9 +258,10 @@ mod tests {
             &db,
             CreateClient {
                 client_id: "cid-1".to_string(),
-                client_secret: "csecret".to_string(),
+                client_secret: Some("csecret".to_string()),
                 redirect_uris: vec!["https://claude.ai/cb".to_string()],
                 client_name: Some("Claude.ai".to_string()),
+                auth_method: ClientAuth::SecretBasic,
             },
         )
         .await
@@ -212,8 +272,103 @@ mod tests {
         assert_eq!(c.redirect_uris, vec!["https://claude.ai/cb"]);
         assert_eq!(c.client_name.as_deref(), Some("Claude.ai"));
         assert!(c.last_used_at.is_none());
+        assert_eq!(c.token_endpoint_auth_method, Some(ClientAuth::SecretBasic));
         assert!(verify_secret("csecret", &c.client_secret_hash).await);
         assert!(!verify_secret("wrong", &c.client_secret_hash).await);
+    }
+
+    #[test]
+    fn client_auth_parse_is_exact() {
+        for m in [
+            ClientAuth::None,
+            ClientAuth::SecretPost,
+            ClientAuth::SecretBasic,
+        ] {
+            assert_eq!(ClientAuth::parse(m.as_str()), Some(m));
+        }
+        assert_eq!(ClientAuth::None.as_str(), "none");
+        assert_eq!(ClientAuth::SecretPost.as_str(), "client_secret_post");
+        assert_eq!(ClientAuth::SecretBasic.as_str(), "client_secret_basic");
+        for bad in [
+            "",
+            "None",
+            "NONE",
+            " none",
+            "private_key_jwt",
+            "client_secret_jwt",
+        ] {
+            assert_eq!(ClientAuth::parse(bad), None, "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_hash_never_verifies() {
+        assert!(!verify_secret("x", "").await);
+        assert!(!verify_secret("", "").await);
+    }
+
+    #[tokio::test]
+    async fn public_client_stores_empty_hash_and_method_none() {
+        let db = Db::open_in_memory().await.unwrap();
+        create(
+            &db,
+            CreateClient {
+                client_id: "pub".to_string(),
+                client_secret: None,
+                redirect_uris: vec![],
+                client_name: None,
+                auth_method: ClientAuth::None,
+            },
+        )
+        .await
+        .unwrap();
+        let c = get(&db, "pub").await.unwrap().unwrap();
+        assert_eq!(c.client_secret_hash, "");
+        assert_eq!(c.token_endpoint_auth_method, Some(ClientAuth::None));
+        assert!(!verify_secret("x", &c.client_secret_hash).await);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_secret_and_method_mismatch() {
+        let db = Db::open_in_memory().await.unwrap();
+        for (secret, method) in [
+            (None, ClientAuth::SecretPost),
+            (None, ClientAuth::SecretBasic),
+            (Some("s".to_string()), ClientAuth::None),
+        ] {
+            let err = create(
+                &db,
+                CreateClient {
+                    client_id: "bad".to_string(),
+                    client_secret: secret,
+                    redirect_uris: vec![],
+                    client_name: None,
+                    auth_method: method,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, DbError::Invalid(_)));
+        }
+        assert!(get(&db, "bad").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_null_method_reads_as_none_and_garbage_is_an_error() {
+        let db = Db::open_in_memory().await.unwrap();
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO mcp_clients (client_id, client_secret_hash, redirect_uris, client_name, created_at, last_used_at, token_endpoint_auth_method)
+                 VALUES ('legacy','h','[]',NULL,0,0,NULL), ('garbage','h','[]',NULL,0,0,'private_key_jwt')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let legacy = get(&db, "legacy").await.unwrap().unwrap();
+        assert_eq!(legacy.token_endpoint_auth_method, None);
+        assert!(get(&db, "garbage").await.is_err());
     }
 
     #[tokio::test]
@@ -221,9 +376,10 @@ mod tests {
         let db = Db::open_in_memory().await.unwrap();
         let make = || CreateClient {
             client_id: "cid".to_string(),
-            client_secret: "x".to_string(),
+            client_secret: Some("x".to_string()),
             redirect_uris: vec![],
             client_name: None,
+            auth_method: ClientAuth::SecretPost,
         };
         create(&db, make()).await.unwrap();
         let err = create(&db, make()).await.unwrap_err();
@@ -243,9 +399,10 @@ mod tests {
             &db,
             CreateClient {
                 client_id: "cid".to_string(),
-                client_secret: "x".to_string(),
+                client_secret: Some("x".to_string()),
                 redirect_uris: vec![],
                 client_name: None,
+                auth_method: ClientAuth::SecretPost,
             },
         )
         .await

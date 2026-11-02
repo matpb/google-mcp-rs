@@ -31,7 +31,20 @@ pub struct ServerConfig {
     /// Which file-maintenance tools (`files_info`/`files_cleanup`) to expose.
     /// Off by default so no deletion/listing tool appears unless opted in.
     pub file_maintenance: FileMaintenance,
+    /// Access JWT lifetime in seconds, from `ACCESS_TOKEN_LIFETIME_SECS`.
+    pub access_token_lifetime_secs: u64,
+    /// Window in which one reuse of a rotated refresh token is tolerated,
+    /// from `REFRESH_REUSE_GRACE_SECS` (0 disables it).
+    pub refresh_reuse_grace_secs: i64,
 }
+
+/// Default access token lifetime (1 hour).
+pub const DEFAULT_ACCESS_TOKEN_LIFETIME_SECS: u64 = 3600;
+const MIN_ACCESS_TOKEN_LIFETIME_SECS: u64 = 60;
+const MAX_ACCESS_TOKEN_LIFETIME_SECS: u64 = 2_592_000;
+/// Default refresh-token reuse grace (seconds).
+pub const DEFAULT_REFRESH_REUSE_GRACE_SECS: i64 = 10;
+pub const MAX_REFRESH_REUSE_GRACE_SECS: i64 = 60;
 
 impl ServerConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -97,6 +110,31 @@ impl ServerConfig {
             FileMaintenance::parse(optional_env("FILE_MAINTENANCE_TOOLS").as_deref())
                 .map_err(ConfigError::InvalidFileMaintenance)?;
 
+        let access_token_lifetime_secs = optional_env("ACCESS_TOKEN_LIFETIME_SECS")
+            .map(|s| {
+                s.parse::<u64>().map_err(|_| {
+                    ConfigError::Invalid(
+                        "ACCESS_TOKEN_LIFETIME_SECS must be a non-negative integer",
+                    )
+                })
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_ACCESS_TOKEN_LIFETIME_SECS)
+            .clamp(
+                MIN_ACCESS_TOKEN_LIFETIME_SECS,
+                MAX_ACCESS_TOKEN_LIFETIME_SECS,
+            );
+
+        let refresh_reuse_grace_secs = optional_env("REFRESH_REUSE_GRACE_SECS")
+            .map(|s| {
+                s.parse::<i64>().map_err(|_| {
+                    ConfigError::Invalid("REFRESH_REUSE_GRACE_SECS must be an integer")
+                })
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_REFRESH_REUSE_GRACE_SECS)
+            .clamp(0, MAX_REFRESH_REUSE_GRACE_SECS);
+
         Ok(Self {
             host,
             port,
@@ -112,6 +150,8 @@ impl ServerConfig {
             allowed_google_accounts,
             file_jail,
             file_maintenance,
+            access_token_lifetime_secs,
+            refresh_reuse_grace_secs,
         })
     }
 
@@ -222,6 +262,11 @@ impl fmt::Debug for ServerConfig {
             .field("allowed_google_accounts", &self.allowed_google_accounts)
             .field("file_jail", &self.file_jail)
             .field("file_maintenance", &self.file_maintenance)
+            .field(
+                "access_token_lifetime_secs",
+                &self.access_token_lifetime_secs,
+            )
+            .field("refresh_reuse_grace_secs", &self.refresh_reuse_grace_secs)
             .finish()
     }
 }
@@ -427,5 +472,84 @@ mod tests {
                 ));
             },
         );
+    }
+
+    fn base_env<'a>(extra: &[(&'a str, Option<&'a str>)]) -> Vec<(&'a str, Option<&'a str>)> {
+        let mut v = vec![
+            ("BASE_URL", Some("http://localhost:8433")),
+            ("GOOGLE_CLIENT_ID", Some("a")),
+            ("GOOGLE_CLIENT_SECRET", Some("b")),
+            ("JWT_SECRET", Some(valid_jwt_secret())),
+            ("STORAGE_ENCRYPTION_KEY", Some(valid_storage_key())),
+        ];
+        v.extend_from_slice(extra);
+        v
+    }
+
+    #[test]
+    fn token_lifetime_defaults() {
+        with_env(
+            &base_env(&[
+                ("ACCESS_TOKEN_LIFETIME_SECS", None),
+                ("REFRESH_REUSE_GRACE_SECS", None),
+            ]),
+            || {
+                let cfg = ServerConfig::from_env().expect("config");
+                assert_eq!(cfg.access_token_lifetime_secs, 3600);
+                assert_eq!(cfg.refresh_reuse_grace_secs, 10);
+            },
+        );
+    }
+
+    #[test]
+    fn token_lifetime_values_are_clamped() {
+        for (raw, want) in [("1", 60), ("120", 120), ("99999999999", 2_592_000)] {
+            with_env(
+                &base_env(&[
+                    ("ACCESS_TOKEN_LIFETIME_SECS", Some(raw)),
+                    ("REFRESH_REUSE_GRACE_SECS", None),
+                ]),
+                || {
+                    let cfg = ServerConfig::from_env().expect("config");
+                    assert_eq!(cfg.access_token_lifetime_secs, want, "{raw}");
+                },
+            );
+        }
+        for (raw, want) in [("0", 0), ("30", 30), ("600", 60), ("-5", 0)] {
+            with_env(
+                &base_env(&[
+                    ("ACCESS_TOKEN_LIFETIME_SECS", None),
+                    ("REFRESH_REUSE_GRACE_SECS", Some(raw)),
+                ]),
+                || {
+                    let cfg = ServerConfig::from_env().expect("config");
+                    assert_eq!(cfg.refresh_reuse_grace_secs, want, "{raw}");
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn token_lifetime_rejects_non_numbers() {
+        for (k, v) in [
+            ("ACCESS_TOKEN_LIFETIME_SECS", "soon"),
+            ("ACCESS_TOKEN_LIFETIME_SECS", "-1"),
+            ("REFRESH_REUSE_GRACE_SECS", "1.5"),
+            ("REFRESH_REUSE_GRACE_SECS", "ten"),
+        ] {
+            with_env(
+                &base_env(&[
+                    ("ACCESS_TOKEN_LIFETIME_SECS", None),
+                    ("REFRESH_REUSE_GRACE_SECS", None),
+                    (k, Some(v)),
+                ]),
+                || {
+                    assert!(
+                        matches!(ServerConfig::from_env(), Err(ConfigError::Invalid(_))),
+                        "{k}={v}"
+                    );
+                },
+            );
+        }
     }
 }

@@ -42,7 +42,7 @@ The first-party Google Workspace MCP server is missing fundamentals (you cannot 
 `google-mcp-rs` plays two OAuth roles:
 
 1. **Resource Server** — gates `/mcp` and returns `401 + WWW-Authenticate` with a `resource_metadata` URL pointing at `/.well-known/oauth-protected-resource/mcp`.
-2. **Authorization Server** — serves `/.well-known/oauth-authorization-server`, `/oauth/register` (DCR), `/authorize`, `/oauth/token`. MCP clients self-register and obtain MCP JWTs from us.
+2. **Authorization Server** — serves `/.well-known/oauth-authorization-server`, `/oauth/register` (DCR), `/authorize`, `/oauth/token`. MCP clients self-register and obtain MCP JWTs (one hour) and rotating refresh tokens from us.
 
 Because Google's OAuth lacks dynamic client registration and won't accept arbitrary `aud` claims, the server runs in **proxy mode**:
 
@@ -63,7 +63,7 @@ google-mcp ──── redirect ───▶ accounts.google.com (Google's own 
    │  (server stores Google refresh token, encrypted)
    │
    │ 5. redirect to MCP client's redirect_uri with our code
-   │ 6. /oauth/token (exchange code + PKCE verifier) ─▶ MCP JWT
+   │ 6. /oauth/token (code + PKCE verifier) ─▶ MCP JWT + refresh token
    ▼
 MCP client → /mcp Authorization: Bearer <MCP JWT>
               tools call Gmail with the user's stored refresh token
@@ -76,7 +76,9 @@ State is threaded MCP-client → our consent screen → Google → callback via 
 - **Consent screen.** `/authorize` renders our own approval page before redirecting to Google: it shows the connecting client's self-reported name (explicitly labeled as unverified), where access will be sent (parsed from the real `redirect_uri`, never the raw string), and the Google scopes about to be requested. Approval is bound to the browser with a per-flow `HttpOnly` cookie, so an attacker who tricks a victim into visiting a crafted `/authorize` link cannot get it silently approved — the approving browser must be the one that started the flow. A request to `/authorize` on any host other than `BASE_URL` is redirected to `BASE_URL` first, so the binding cookie is always set on the right origin. Denying returns `error=access_denied` to the MCP client. The state row (and its cookie) expire after 10 minutes; the authorization code minted after approval expires after 5 minutes.
 - **Token verification at the gate.** Every `/mcp` request's bearer token is fully verified — signature, expiry, and audience — before it reaches a tool handler. An invalid or expired token gets `401` with `WWW-Authenticate: Bearer error="invalid_token"`, which well-behaved MCP clients treat as a signal to re-authenticate automatically. A token's `aud` claim must name this server's own `/mcp` URL (every token this server has ever issued does); `/oauth/token` separately validates an RFC 8707 `resource` parameter against the same allowlist and rejects a mismatch with `invalid_target`.
 - **Host allowlist (anti DNS-rebinding).** Every route except `/health` validates the `Host` header (and any `X-Forwarded-Host` element) against loopback names, `BASE_URL`'s own host, and the operator-supplied `ALLOWED_HOSTS` list. A request with an unrecognized Host gets `403`.
-- **Revocation.** `google-mcp accounts revoke <email-or-sub>` writes a tombstone (`not_before` timestamp) that invalidates *every* JWT issued for that account before the moment of revocation — including ones that haven't expired yet — then best-effort revokes the refresh token with Google and deletes the stored account row. This is the only way to cut a session short before its 30-day JWT lifetime; rotating `JWT_SECRET` (which logs out everyone) is no longer the only lever.
+- **Client authentication.** Each client's `token_endpoint_auth_method` is recorded at registration (`client_secret_basic`, the RFC 7591 default, `client_secret_post`, or `none` for public clients; anything else is refused) and enforced at `/oauth/token`: a secret-holding client must present its secret, in an HTTP Basic header or the form. The client is authenticated *before* its authorization code or refresh token is consumed, so bad credentials never burn a legitimate user's code or session. Clients registered before 1.3.0 are treated as public clients. Details in [docs/oauth-tokens.md](docs/oauth-tokens.md).
+- **Refresh tokens.** `/oauth/token` issues a short-lived JWT (one hour by default, `ACCESS_TOKEN_LIFETIME_SECS`) with an opaque refresh token. Each refresh returns a new pair and retires the old token, in one database transaction. Presenting a retired token again (a copy) revokes the whole chain, as RFC 9700 recommends, except within a short grace window (`REFRESH_REUSE_GRACE_SECS`, 10 seconds by default, `0` disables) where the retry receives the same successor again, so a lost response or two concurrent refreshes do not log the user out and the chain never forks. A refresh token presented by a different client also revokes its chain. Refresh tokens are stored only as SHA-256 hashes, expire after 30 days unused and 90 days after sign-in at the latest, and are refused once the account is revoked or disconnected. `/mcp` refuses access tokens whose lifetime exceeds the configured one, which retires the 30-day tokens of earlier versions. Token and registration responses are sent with `Cache-Control: no-store`. See [docs/oauth-tokens.md](docs/oauth-tokens.md) for the full lifecycle and threat model.
+- **Revocation.** `google-mcp accounts revoke <email-or-sub>` writes a tombstone (`not_before` timestamp) that invalidates *every* JWT issued for that account before the moment of revocation — including ones that haven't expired yet — then best-effort revokes the refresh token with Google and deletes the stored account row. It also deletes the account's MCP refresh tokens, and a refresh token issued before the tombstone is refused anyway, so the session ends within the hour even without a JWT check; rotating `JWT_SECRET` (which logs out everyone) is no longer the only lever.
 - **Account allowlist.** Optional `ALLOWED_GOOGLE_ACCOUNTS` restricts which Google identities may connect at all, by exact email or `@domain` (matched against Google's `hd` claim, which requires a verified email on that account). Enforced at sign-in and re-checked on every tool call, so removing someone from the list also cuts off tokens issued before the change.
 - **Dynamic client registration hardening.** Redirect URIs are parsed (not string-matched): no embedded userinfo, no fragment, `https` or loopback `http` only (plus Cursor's private-use scheme). Registrations are capped at 10,000 rows and size-limited; unused client registrations are pruned automatically after 24 hours of inactivity. Client secrets are hashed with SHA-256 (legacy Argon2id hashes from earlier registrations still verify).
 - **File-exchange jail.** When `FILE_ROOT` is set, every path is canonicalized and checked to be inside it before any read or write — absolute paths must live under it, relative paths resolve against it, `..` and symlink escapes are rejected, and writes are atomic (temp file + rename, never following a symlink at the destination or creating directories outside the root).
@@ -87,11 +89,10 @@ State is threaded MCP-client → our consent screen → Google → callback via 
 
 This server is designed to be **self-hosted on your own machine** — typically one instance per workstation, listening on `127.0.0.1`, serving multiple MCP clients and multiple Google accounts at once. The quick-start below walks you through exactly that.
 
-Public-internet deployment is *possible* — the OAuth flow, the consent screen with browser-binding, the host allowlist, full bearer-token verification, per-account revocation, an optional account allowlist, AES-256-GCM refresh-token encryption, S256 PKCE, and single-use short-TTL codes are all in place — but a couple of gaps remain worth knowing about before you expose this beyond your own network:
+Public-internet deployment is *possible* — the OAuth flow, the consent screen with browser-binding, the host allowlist, full bearer-token verification, per-account revocation, an optional account allowlist, AES-256-GCM refresh-token encryption, S256 PKCE, and single-use short-TTL codes are all in place — but two gaps remain worth knowing about before you expose this beyond your own network:
 
 - **No built-in rate limiting** on `/oauth/register`, `/oauth/token`, `/authorize`, or `/mcp`. Brute-force and DoS are unmitigated at the application layer — put a reverse proxy (nginx, Caddy, Cloudflare, etc.) with request-rate limits in front of a public instance.
 - **No network egress policy** on the container — a compromised process could reach anywhere on the internet. Pair the provided `docker-compose.yml` hardening (read-only root, all capabilities dropped, `no-new-privileges`) with an egress firewall rule if that matters for your threat model.
-- **JWTs still live 30 days.** That's now recoverable — `accounts revoke` invalidates them immediately — but there's no short-lived-access-token + refresh-token split, so a leaked JWT is valid until either its expiry or an explicit revoke.
 
 If those gaps don't fit your threat model, fork it. The architecture is set up to make those additions straightforward, and PRs are welcome. See [SECURITY.md](SECURITY.md) for the full threat model and how to report a vulnerability.
 
@@ -220,7 +221,7 @@ claude mcp add --transport http --scope user google-personal http://localhost:84
 claude mcp add --transport http --scope user google-work     http://localhost:8433/mcp
 ```
 
-Then in any Claude Code session run `/mcp` and authenticate each entry. The JWTs land in Claude Code's credential vault; the server is multi-tenant and keys on Google `sub`, so one running instance handles both accounts. JWT lifetime is 30 days (revocable early with `google-mcp accounts revoke`, see [Operations](#operations)); access tokens refresh transparently every hour.
+Then in any Claude Code session run `/mcp` and authenticate each entry. The JWTs land in Claude Code's credential vault; the server is multi-tenant and keys on Google `sub`, so one running instance handles both accounts. JWTs live one hour and the client renews them with its refresh token (revocable early with `google-mcp accounts revoke`, see [Operations](#operations)); Google access tokens refresh transparently every hour.
 
 For **Claude.ai / ChatGPT custom connectors / Cursor**, add a custom connector pointing at `http://localhost:8433/mcp` — these clients have to support local-loopback URLs and the MCP 2025-11-25 OAuth flow, which not all of them do yet.
 
@@ -244,6 +245,8 @@ Every variable `ServerConfig::from_env()` reads, from `src/config.rs`:
 | `ALLOWED_GOOGLE_ACCOUNTS` | no | unrestricted | Comma-separated exact emails and/or `@domain` entries. A `@domain` entry matches Google's `hd` claim (Workspace domain), not an email suffix. Empty/unset = any Google account may connect |
 | `FILE_ROOT` | no | — (disabled) | Absolute path to the file-exchange directory, bind-mounted into the container at the same path. Enables attaching/uploading by `path` and saving downloads by `dest_path` instead of base64. Unset = base64-only. See [File handling](#file-handling-attachments-uploads-downloads) |
 | `FILE_MAINTENANCE_TOOLS` | no | `off` | Whether the directory-maintenance tools are exposed: `off` (neither), `info` (read-only `files_info`), or `full` (`files_info` + the deleting `files_cleanup`). Off by default, so no deletion/listing tool exists unless you opt in. Only meaningful when `FILE_ROOT` is set |
+| `ACCESS_TOKEN_LIFETIME_SECS` | no | `3600` | HTTP mode: lifetime of the MCP access JWTs, clamped to `60`..`2592000` (30 days). Clients renew them with their refresh token. See [docs/oauth-tokens.md](docs/oauth-tokens.md) |
+| `REFRESH_REUSE_GRACE_SECS` | no | `10` | HTTP mode: seconds during which presenting a just-retired refresh token again returns the same successor (a lost response or a concurrent refresh) instead of counting as theft and revoking its chain. Clamped to `0`..`60`; `0` makes any reuse revoke |
 | `GOOGLE_MCP_ENV_FILE` | no | — | Absolute path to an env file to load in *any* mode (`http`, `stdio`, `auth`, `accounts`), instead of `./.env`. Never overrides an already-set variable. Missing/unreadable file exits with code 2 |
 
 Not read by `ServerConfig`, but honored elsewhere:
@@ -323,7 +326,7 @@ docker exec google-mcp google-mcp accounts list
 docker exec google-mcp google-mcp accounts revoke someone@example.com
 ```
 
-`accounts list` prints every connected Google account with its `sub`, email, and created/updated/last-refresh timestamps. `accounts revoke` writes a revocation tombstone (instantly invalidating every JWT issued for that account, even ones that haven't expired), best-effort revokes the refresh token with Google, and deletes the stored account row. Run it as soon as you suspect a token leaked — you don't have to wait for the 30-day JWT lifetime to run out or rotate `JWT_SECRET` for everyone.
+`accounts list` prints every connected Google account with its `sub`, email, and created/updated/last-refresh timestamps. `accounts revoke` writes a revocation tombstone (instantly invalidating every JWT issued for that account, even ones that haven't expired), best-effort revokes the refresh token with Google, and deletes the stored account row. Run it as soon as you suspect a token leaked — you don't have to wait for the JWT to expire or rotate `JWT_SECRET` for everyone.
 
 ### Backups
 
@@ -608,7 +611,6 @@ Every error returned by the server includes a structured `data` payload alongsid
 
 - **Per-tool `account` parameter** for multi-account workflows in a single MCP session.
 - **Resumable Drive uploads** for files larger than the current multipart cap.
-- **Short-lived access tokens + refresh tokens** as an alternative to the current 30-day JWT, for deployments that want tighter exposure windows without relying on explicit revocation.
 - **Built-in rate limiting** for `/oauth/*` and `/mcp`, for operators who'd rather not stand up a reverse proxy just for that.
 
 ## Releasing

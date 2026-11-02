@@ -123,9 +123,10 @@ pub fn security_headers(headers: &mut HeaderMap) {
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
+    // no-referrer would make browsers send `Origin: null` on the consent POST, failing the origin check.
     headers.insert(
         header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
+        HeaderValue::from_static("same-origin"),
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
 }
@@ -192,5 +193,12 @@ mod tests {
     fn consent_page_includes_state_id_in_hidden_field() {
         let page = render_consent_page(None, "https://x.example/cb", &[], "abc123");
         assert!(page.contains(r#"value="abc123""#));
+    }
+
+    #[test]
+    fn referrer_policy_keeps_the_consent_post_origin() {
+        let mut headers = HeaderMap::new();
+        security_headers(&mut headers);
+        assert_eq!(headers[header::REFERRER_POLICY], "same-origin");
     }
 }
