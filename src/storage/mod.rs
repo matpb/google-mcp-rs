@@ -50,13 +50,15 @@ pub enum DbError {
 const MIGRATION_001: &str = include_str!("migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("migrations/002_consent_and_revocation.sql");
 const MIGRATION_003: &str = include_str!("migrations/003_refresh_tokens.sql");
-const LATEST_VERSION: i64 = 3;
+const MIGRATION_004: &str = include_str!("migrations/004_refresh_rotation_and_client_auth.sql");
+const LATEST_VERSION: i64 = 4;
 
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_001),
         M::up(MIGRATION_002),
         M::up(MIGRATION_003),
+        M::up(MIGRATION_004),
     ])
 }
 
@@ -291,6 +293,153 @@ mod tests {
         assert!(
             std::path::Path::new(&backup_path).exists(),
             "expected pre-002 backup at {backup_path}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&backup_path)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "backup should be created 0600");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn client_columns(db: &Db) -> Vec<String> {
+        db.call(|conn| {
+            let mut stmt = conn.prepare("PRAGMA table_info(mcp_clients)")?;
+            let names = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(names)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn migration_004_adds_auth_method_column_on_fresh_db() {
+        let db = Db::open_in_memory().await.expect("open");
+        assert!(
+            client_columns(&db)
+                .await
+                .contains(&"token_endpoint_auth_method".to_string())
+        );
+        let cols: Vec<String> = db
+            .call(|conn| {
+                let mut stmt = conn.prepare("PRAGMA table_info(mcp_refresh_tokens)")?;
+                let names = stmt
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(names)
+            })
+            .await
+            .unwrap();
+        assert!(cols.contains(&"family_issued_at".to_string()));
+        assert!(cols.contains(&"successor_ct".to_string()));
+        assert!(cols.contains(&"successor_nonce".to_string()));
+        assert!(!cols.contains(&"grace_used".to_string()));
+    }
+
+    #[tokio::test]
+    async fn migration_004_upgrades_contributor_v3_db() {
+        let dir = std::env::temp_dir().join(format!("gmcp-mig4-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("db.sqlite");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+
+        {
+            let mut conn = Connection::open(&db_path_str).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            Migrations::new(vec![
+                M::up(MIGRATION_001),
+                M::up(MIGRATION_002),
+                M::up(MIGRATION_003),
+            ])
+            .to_latest(&mut conn)
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mcp_clients (client_id, client_secret_hash, redirect_uris, client_name, created_at)
+                 VALUES ('legacy','h','[]',NULL, 1000)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO oauth_accounts (google_sub, email, refresh_token_ct, refresh_token_nonce, scopes, created_at, updated_at)
+                 VALUES ('sub-1','sam@example.com',x'00',x'00','',0,0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mcp_refresh_tokens (token_hash, family_id, mcp_client_id, google_sub, resource, issued_at, expires_at, used_at)
+                 VALUES ('old-hash','old-fam','legacy','sub-1',NULL,1000,9999999999,NULL)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(db_path_str.clone()).await.expect("open v3 db");
+        assert!(
+            client_columns(&db)
+                .await
+                .contains(&"token_endpoint_auth_method".to_string())
+        );
+        let method: Option<String> = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT token_endpoint_auth_method FROM mcp_clients WHERE client_id='legacy'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(method.is_none(), "pre-existing rows stay NULL (legacy)");
+
+        let old_rows: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM mcp_refresh_tokens WHERE token_hash = 'old-hash'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(old_rows, 0, "old-schema rows are dropped");
+        refresh_tokens::issue(
+            &db,
+            "fresh-token",
+            refresh_tokens::IssueRefresh {
+                family_id: "fam".to_string(),
+                mcp_client_id: "legacy".to_string(),
+                google_sub: "sub-1".to_string(),
+                resource: None,
+            },
+        )
+        .await
+        .unwrap();
+        let rotated = refresh_tokens::rotate(
+            &db,
+            refresh_tokens::RotateRequest {
+                presented: "fresh-token",
+                client_id: "legacy",
+                resource: None,
+                successor: "next-token",
+                grace_secs: 10,
+                encryption_key: &[0u8; 32],
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(rotated, refresh_tokens::Rotation::Valid { .. }));
+
+        let backup_path = format!("{db_path_str}.pre-004.bak");
+        assert!(
+            std::path::Path::new(&backup_path).exists(),
+            "expected pre-004 backup at {backup_path}"
         );
         #[cfg(unix)]
         {

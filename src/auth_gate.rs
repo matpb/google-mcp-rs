@@ -12,7 +12,7 @@ use http::{HeaderValue, StatusCode};
 
 use crate::host_guard;
 use crate::oauth::JwtError;
-use crate::oauth::jwt::verify;
+use crate::oauth::jwt::{Claims, verify};
 use crate::oauth::proxy::issuer_from_headers;
 use crate::state::AppState;
 
@@ -43,6 +43,12 @@ pub async fn require_bearer(
         host_guard::aud_is_valid(aud, &allowed_hosts)
     }) {
         Ok(claims) => {
+            if !lifetime_ok(&claims, state.config.access_token_lifetime_secs) {
+                return challenge(
+                    &resource_metadata,
+                    Some("token lifetime exceeds server policy"),
+                );
+            }
             match crate::storage::revocations::not_before(&state.db, &claims.sub).await {
                 Ok(Some(nb)) if (claims.iat as i64) <= nb => {
                     return challenge(&resource_metadata, Some("token revoked"));
@@ -58,6 +64,14 @@ pub async fn require_bearer(
         }
         Err(e) => challenge(&resource_metadata, Some(invalid_token_reason(&e))),
     }
+}
+
+/// Slack on the configured lifetime, matching the verifier's clock leeway.
+const LIFETIME_SLACK_SECS: u64 = 60;
+
+/// Rejects tokens minted with a longer lifetime than the server allows now.
+fn lifetime_ok(claims: &Claims, max_lifetime_secs: u64) -> bool {
+    claims.exp.saturating_sub(claims.iat) <= max_lifetime_secs.saturating_add(LIFETIME_SLACK_SECS)
 }
 
 fn invalid_token_reason(e: &JwtError) -> &'static str {
@@ -83,4 +97,38 @@ fn challenge(resource_metadata: &str, reason: Option<&str>) -> Response {
         resp.headers_mut().insert(http::header::WWW_AUTHENTICATE, v);
     }
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claims(lifetime: u64) -> Claims {
+        Claims {
+            iss: "http://localhost:8433".to_string(),
+            sub: "sub-1".to_string(),
+            iat: 1_000,
+            exp: 1_000 + lifetime,
+            aud: "http://localhost:8433/mcp".to_string(),
+        }
+    }
+
+    #[test]
+    fn lifetime_ok_allows_up_to_the_policy_plus_slack() {
+        assert!(lifetime_ok(&claims(3600), 3600));
+        assert!(lifetime_ok(&claims(3660), 3600));
+        assert!(!lifetime_ok(&claims(3661), 3600));
+        assert!(!lifetime_ok(&claims(30 * 24 * 3600), 3600));
+        assert!(lifetime_ok(&claims(30 * 24 * 3600), 30 * 24 * 3600));
+    }
+
+    #[test]
+    fn lifetime_ok_survives_odd_claims() {
+        let mut c = claims(0);
+        c.exp = 5;
+        c.iat = 10;
+        assert!(lifetime_ok(&c, 60));
+        assert!(!lifetime_ok(&claims(u64::MAX - 1_000), 3600));
+        assert!(lifetime_ok(&claims(3600), u64::MAX));
+    }
 }

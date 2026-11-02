@@ -57,6 +57,9 @@ For the mechanisms behind these, see the README's [Security model](README.md#sec
 - The server-rendered `/authorize` consent screen with per-flow browser binding.
 - Full bearer-token verification (signature, expiry, audience) at the `/mcp` gate, with `401 invalid_token` on failure.
 - RFC 8707 `resource`/audience validation at `/oauth/token`.
+- Enforced client authentication at `/oauth/token` (`client_secret_basic`, `client_secret_post`, or `none` as registered), checked before any code or refresh token is consumed.
+- Short-lived access tokens with rotating, hash-stored refresh tokens: replay or use by another client revokes the whole chain. See [docs/oauth-tokens.md](docs/oauth-tokens.md) for the token lifecycle and its threat model.
+- `Cache-Control: no-store` on every token and registration response.
 - The `Host`/`X-Forwarded-Host` allowlist on every route except `/health`.
 - Per-account revocation (`google-mcp accounts revoke`) and an optional account allowlist (`ALLOWED_GOOGLE_ACCOUNTS`).
 - Hardened dynamic client registration (parsed redirect-URI validation, size limits, a registration cap, automatic pruning).

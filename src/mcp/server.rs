@@ -176,6 +176,8 @@ mod harness {
             allowed_google_accounts: vec![],
             file_jail: None,
             file_maintenance: crate::files::FileMaintenance::Off,
+            access_token_lifetime_secs: 3600,
+            refresh_reuse_grace_secs: 10,
         });
         let state = AppState {
             config,
@@ -222,6 +224,8 @@ mod harness {
             allowed_google_accounts: vec![],
             file_jail: Some(jail),
             file_maintenance: maintenance,
+            access_token_lifetime_secs: 3600,
+            refresh_reuse_grace_secs: 10,
         };
         let mut state = mcp.state.clone();
         state.config = std::sync::Arc::new(cfg);

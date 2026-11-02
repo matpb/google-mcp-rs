@@ -342,6 +342,11 @@ async fn run_http() {
     }
     let cfg = load_config();
     tracing::info!(?cfg, "starting google-mcp (http)");
+    tracing::info!(
+        access_token_lifetime_secs = cfg.access_token_lifetime_secs,
+        refresh_reuse_grace_secs = cfg.refresh_reuse_grace_secs,
+        "token lifetimes"
+    );
 
     let db = open_database(&cfg).await;
     tracing::info!("database opened at {}", cfg.database_url);
@@ -747,6 +752,11 @@ fn spawn_oauth_state_sweeper(db: Db) {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(err = ?e, "sweep_expired failed"),
             }
+            match storage::refresh_tokens::sweep(&db).await {
+                Ok(n) if n > 0 => tracing::debug!("swept {n} expired mcp_refresh_tokens rows"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(err = ?e, "refresh token sweep failed"),
+            }
             match clients::delete_stale_unused(&db, 24 * 3600).await {
                 Ok(n) if n > 0 => tracing::debug!("swept {n} stale unused mcp_clients rows"),
                 Ok(_) => {}
@@ -893,6 +903,8 @@ mod tests {
             allowed_google_accounts: vec![],
             file_jail: None,
             file_maintenance: files::FileMaintenance::Off,
+            access_token_lifetime_secs: 3600,
+            refresh_reuse_grace_secs: 10,
         });
         AppState {
             config,
@@ -1010,6 +1022,47 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(challenge.contains("token revoked"));
+    }
+
+    async fn mcp_status_with_lifetime(lifetime: u64) -> (StatusCode, String) {
+        let state = test_state("http://localhost:8433", vec![]).await;
+        let now = oauth::jwt::now_secs();
+        let claims = oauth::jwt::Claims {
+            iss: "http://localhost:8433".to_string(),
+            sub: "sub-lifetime".to_string(),
+            iat: now,
+            exp: now + lifetime,
+            aud: "http://localhost:8433/mcp".to_string(),
+        };
+        let jwt = oauth::jwt::sign(&state.config.jwt_secret, &claims).unwrap();
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(http::header::HOST, "localhost:8433")
+            .header(http::header::AUTHORIZATION, format!("Bearer {jwt}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let challenge = resp
+            .headers()
+            .get(http::header::WWW_AUTHENTICATE)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        (resp.status(), challenge)
+    }
+
+    #[tokio::test]
+    async fn thirty_day_token_is_rejected_when_policy_is_one_hour() {
+        let (status, challenge) = mcp_status_with_lifetime(30 * 24 * 3600).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(challenge.contains("token lifetime exceeds server policy"));
+    }
+
+    #[tokio::test]
+    async fn token_within_policy_passes_the_gate() {
+        let (status, challenge) = mcp_status_with_lifetime(3600).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{challenge}");
     }
 
     #[tokio::test]

@@ -275,9 +275,10 @@ mod tests {
             db,
             clients::CreateClient {
                 client_id: cid.to_string(),
-                client_secret: "s".to_string(),
+                client_secret: Some("s".to_string()),
                 redirect_uris: vec!["https://x/cb".to_string()],
                 client_name: None,
+                auth_method: clients::ClientAuth::SecretPost,
             },
         )
         .await
