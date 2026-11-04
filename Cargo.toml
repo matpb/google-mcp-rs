@@ -49,7 +49,7 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 rusqlite_migration = "~2.5"
 
 # MIME
-mail-builder = "1.0"
+mail-builder = "2.0"
 
 # Logging
 tracing = "0.1"
