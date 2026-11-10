@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 use rusqlite::params;
-use rusqlite_migration::{M, Migrations};
 
 #[derive(Clone)]
 pub struct Db {
@@ -27,8 +26,10 @@ pub struct Db {
 pub enum DbError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("migration: {0}")]
-    Migration(#[from] rusqlite_migration::Error),
+    #[error("database schema version {db} is newer than this binary supports ({binary})")]
+    DatabaseTooFarAhead { db: i64, binary: i64 },
+    #[error("invalid database user_version {0}")]
+    InvalidUserVersion(i64),
     #[error("crypto: {0}")]
     Crypto(#[from] crypto::CryptoError),
     #[error("password hash: {0}")]
@@ -51,15 +52,37 @@ const MIGRATION_001: &str = include_str!("migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("migrations/002_consent_and_revocation.sql");
 const MIGRATION_003: &str = include_str!("migrations/003_refresh_tokens.sql");
 const MIGRATION_004: &str = include_str!("migrations/004_refresh_rotation_and_client_auth.sql");
-const LATEST_VERSION: i64 = 4;
+/// Migration `n` (1-based) leaves `user_version` at `n`.
+const MIGRATIONS: &[&str] = &[MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004];
+const LATEST_VERSION: i64 = MIGRATIONS.len() as i64;
 
-fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![
-        M::up(MIGRATION_001),
-        M::up(MIGRATION_002),
-        M::up(MIGRATION_003),
-        M::up(MIGRATION_004),
-    ])
+/// Run the migrations past `user_version` in one transaction and store their count in it.
+fn migrate_to(conn: &mut Connection, migrations: &[&str]) -> Result<(), DbError> {
+    let target = migrations.len() as i64;
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if current < 0 {
+        return Err(DbError::InvalidUserVersion(current));
+    }
+    if current > target {
+        return Err(DbError::DatabaseTooFarAhead {
+            db: current,
+            binary: target,
+        });
+    }
+    if current == target {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    for sql in &migrations[current as usize..] {
+        tx.execute_batch(sql)?;
+    }
+    tx.pragma_update(None, "user_version", target)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_to_latest(conn: &mut Connection) -> Result<(), DbError> {
+    migrate_to(conn, MIGRATIONS)
 }
 
 /// Create the DB file at mode 0600 if absent, or tighten it if group/other
@@ -93,9 +116,8 @@ fn ensure_file_permissions(_path: &str) -> Result<(), DbError> {
     Ok(())
 }
 
-/// `rusqlite_migration` errors `DatabaseTooFarAhead` if an older binary later
-/// opens a migrated DB, so back up an existing DB before any migration runs,
-/// as `<path>.pre-<next version>.bak`.
+/// An older binary refuses a DB newer than itself (`DbError::DatabaseTooFarAhead`),
+/// so back up an existing DB before any migration runs, as `<path>.pre-<next version>.bak`.
 fn backup_before_migration(conn: &Connection, path: &str) -> Result<(), DbError> {
     if path == ":memory:" || path.is_empty() {
         return Ok(());
@@ -125,7 +147,7 @@ impl Db {
             conn.pragma_update(None, "foreign_keys", "ON")?;
             conn.pragma_update(None, "synchronous", "NORMAL")?;
             backup_before_migration(&conn, &path)?;
-            migrations().to_latest(&mut conn)?;
+            migrate_to_latest(&mut conn)?;
             Ok(conn)
         })
         .await??;
@@ -140,7 +162,7 @@ impl Db {
         let conn = tokio::task::spawn_blocking(|| -> Result<Connection, DbError> {
             let mut conn = Connection::open_in_memory()?;
             conn.pragma_update(None, "foreign_keys", "ON")?;
-            migrations().to_latest(&mut conn)?;
+            migrate_to_latest(&mut conn)?;
             Ok(conn)
         })
         .await??;
@@ -178,11 +200,68 @@ mod tests {
     #[test]
     fn latest_version_counts_every_migration() {
         let mut conn = Connection::open_in_memory().unwrap();
-        migrations().to_latest(&mut conn).unwrap();
+        migrate_to_latest(&mut conn).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, LATEST_VERSION);
+    }
+
+    #[test]
+    fn fresh_database_ends_at_user_version_4() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_latest(&mut conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+    }
+
+    #[test]
+    fn database_newer_than_binary_is_refused() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_latest(&mut conn).unwrap();
+        conn.pragma_update(None, "user_version", 5).unwrap();
+        let err = migrate_to_latest(&mut conn).unwrap_err();
+        assert!(matches!(
+            err,
+            DbError::DatabaseTooFarAhead { db: 5, binary: 4 }
+        ));
+        assert_eq!(
+            err.to_string(),
+            "database schema version 5 is newer than this binary supports (4)"
+        );
+    }
+
+    #[test]
+    fn negative_user_version_is_refused() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", -1).unwrap();
+        let err = migrate_to_latest(&mut conn).unwrap_err();
+        assert!(matches!(err, DbError::InvalidUserVersion(-1)));
+        assert_eq!(err.to_string(), "invalid database user_version -1");
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_the_whole_run() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let err = migrate_to(&mut conn, &["CREATE TABLE a(x);", "THIS IS NOT SQL"]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "sqlite: near \"THIS\": syntax error in THIS IS NOT SQL at offset 0"
+        );
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
     }
 
     #[tokio::test]
@@ -219,7 +298,7 @@ mod tests {
         let db = Db::open_in_memory().await.expect("open");
         // Re-run migrations against the same connection.
         db.call(|conn| {
-            migrations().to_latest(conn)?;
+            migrate_to_latest(conn)?;
             Ok(())
         })
         .await
@@ -265,9 +344,7 @@ mod tests {
         {
             let mut conn = Connection::open(&db_path_str).unwrap();
             conn.pragma_update(None, "journal_mode", "WAL").unwrap();
-            Migrations::new(vec![M::up(MIGRATION_001)])
-                .to_latest(&mut conn)
-                .unwrap();
+            migrate_to(&mut conn, &MIGRATIONS[..1]).unwrap();
             conn.execute(
                 "INSERT INTO mcp_clients (client_id, client_secret_hash, redirect_uris, client_name, created_at)
                  VALUES ('c1','h','[]',NULL, 1000)",
@@ -353,13 +430,7 @@ mod tests {
         {
             let mut conn = Connection::open(&db_path_str).unwrap();
             conn.pragma_update(None, "journal_mode", "WAL").unwrap();
-            Migrations::new(vec![
-                M::up(MIGRATION_001),
-                M::up(MIGRATION_002),
-                M::up(MIGRATION_003),
-            ])
-            .to_latest(&mut conn)
-            .unwrap();
+            migrate_to(&mut conn, &MIGRATIONS[..3]).unwrap();
             conn.execute(
                 "INSERT INTO mcp_clients (client_id, client_secret_hash, redirect_uris, client_name, created_at)
                  VALUES ('legacy','h','[]',NULL, 1000)",

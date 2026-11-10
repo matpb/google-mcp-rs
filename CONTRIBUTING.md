@@ -4,7 +4,7 @@ Pull requests welcome. This file covers how to build, test, and lint the way CI 
 
 ## Prerequisites
 
-- Rust **1.88** or later (the `rust-version` pinned in `Cargo.toml` — CI's `msrv` job checks against this exact version, so building with it is the safest baseline).
+- Rust **1.89** or later (the `rust-version` pinned in `Cargo.toml` — CI's `msrv` job checks against this exact version, so building with it is the safest baseline).
 - For the full test suite: nothing extra — tests use an in-memory SQLite database.
 
 ## Build, test, lint

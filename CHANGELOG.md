@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- rmcp 3.7.0 -> 3.9.0 (RUSTSEC-2026-0462).
+- rusqlite 0.39 -> 0.41, bundled SQLite via libsqlite3-sys 0.39 (RUSTSEC-2026-0459).
+
+### Changed
+
+- MSRV 1.88 -> 1.89.
+- Schema migrations run by a built-in runner instead of rusqlite_migration. The
+  same `user_version` numbering is kept, so existing databases upgrade in place.
+
 ## [1.3.0] - 2026-11-02
 
 ### Security
