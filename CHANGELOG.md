@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-10
+
 ### Security
 
 - rmcp 3.7.0 -> 3.9.0 (RUSTSEC-2026-0462).
