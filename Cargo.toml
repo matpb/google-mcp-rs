@@ -48,7 +48,7 @@ getrandom = "0.4"
 rusqlite = { version = "0.41", features = ["bundled"] }
 
 # MIME
-mail-builder = "1.0"
+mail-builder = "2.0"
 
 # Logging
 tracing = "0.1"
