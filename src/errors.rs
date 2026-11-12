@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 
 use crate::credentials::CredentialsError;
 use crate::google::calendar::CalendarError;
+use crate::google::chat::ChatError;
 use crate::google::docs::DocsError;
 use crate::google::drive::DriveError;
 use crate::google::gmail::GmailError;
@@ -752,6 +753,40 @@ impl From<TasksError> for McpError {
     }
 }
 
+impl From<ChatError> for McpError {
+    fn from(e: ChatError) -> Self {
+        match e {
+            ChatError::Http(err) => transient_from_reqwest("chat", err),
+            ChatError::Api { status, message } => {
+                let mut err = google_api_error("chat", status.as_u16(), message, None);
+                // Chat answers 403 both for missing access and for a message that no longer exists.
+                if status.as_u16() == 403 && err.category == Category::PermissionDenied {
+                    err.hint = Some("Chat: you must be a member of the space, and edits or deletes apply to your own messages; a 403 also means the message or reaction no longer exists.".into());
+                }
+                err
+            }
+            ChatError::InsufficientScope => McpError {
+                category: Category::AuthRequired,
+                message: "Google Chat rejected the call: this connection was authorized without an OAuth scope this tool needs (ACCESS_TOKEN_SCOPE_INSUFFICIENT)".into(),
+                service: Some("chat"),
+                http_status: Some(403),
+                upstream_reason: Some("ACCESS_TOKEN_SCOPE_INSUFFICIENT".into()),
+                retry_after_ms: None,
+                hint: Some("Re-authorize the Google Chat connection: reconnect this MCP server from the client (in Claude Code, `/mcp`, pick the server, re-authenticate). The consent screen grants the current chat.* scope set.".into()),
+                resource_kind: None,
+                resource_id: None,
+                reconnect_url: Some("/authorize".into()),
+            },
+            ChatError::Parse(err) => {
+                McpError::internal(format!("could not parse Chat response: {err}"))
+                    .with_service("chat")
+            }
+            ChatError::InvalidId(s) => invalid_id_error("chat", s),
+            ChatError::TooLarge { cap, actual } => too_large_error("chat", cap, actual),
+        }
+    }
+}
+
 impl From<HealthError> for McpError {
     fn from(e: HealthError) -> Self {
         match e {
@@ -938,5 +973,50 @@ mod tests {
         assert_eq!(err.category, Category::AuthInvalid);
         let data = err.data();
         assert_eq!(data.get("upstream_reason").unwrap(), "audience_mismatch");
+    }
+
+    #[test]
+    fn chat_missing_scope_maps_to_auth_required_with_reauthorize_hint() {
+        let err: McpError = ChatError::InsufficientScope.into();
+        assert_eq!(err.category, Category::AuthRequired);
+        assert_eq!(err.service, Some("chat"));
+        assert_eq!(err.http_status, Some(403));
+        assert_eq!(err.reconnect_url.as_deref(), Some("/authorize"));
+        assert!(err.hint.unwrap().contains("Re-authorize"));
+    }
+
+    #[test]
+    fn chat_api_errors_use_the_shared_classifier() {
+        let not_found: McpError = ChatError::Api {
+            status: http::StatusCode::NOT_FOUND,
+            message: "gone".into(),
+        }
+        .into();
+        assert_eq!(not_found.category, Category::NotFound);
+        assert_eq!(not_found.service, Some("chat"));
+
+        let forbidden: McpError = ChatError::Api {
+            status: http::StatusCode::FORBIDDEN,
+            message: "no".into(),
+        }
+        .into();
+        assert_eq!(forbidden.category, Category::PermissionDenied);
+        assert!(forbidden.hint.as_deref().unwrap().starts_with("Chat:"));
+
+        let bad: McpError = ChatError::Api {
+            status: http::StatusCode::BAD_REQUEST,
+            message: "bad".into(),
+        }
+        .into();
+        assert_eq!(bad.category, Category::InvalidInput);
+    }
+
+    #[test]
+    fn chat_invalid_name_is_invalid_input_with_hint() {
+        let err: McpError = ChatError::InvalidId("`x` is not a valid name".into()).into();
+        assert_eq!(err.category, Category::InvalidInput);
+        assert_eq!(err.service, Some("chat"));
+        assert!(err.message.contains("invalid chat id"));
+        assert!(err.hint.is_some());
     }
 }

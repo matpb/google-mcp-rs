@@ -69,6 +69,7 @@ impl GoogleMcp {
             Domain::People => Self::people_router(),
             Domain::SearchConsole => Self::searchconsole_router(),
             Domain::Health => Self::health_router(),
+            Domain::Chat => Self::chat_router(),
         }
     }
 
@@ -255,6 +256,7 @@ mod harness {
             Domain::People => 13,
             Domain::SearchConsole => 8,
             Domain::Health => 11,
+            Domain::Chat => 15,
         }
     }
 }
@@ -379,6 +381,150 @@ mod tests {
                 .await
                 .contains("health_list_data_types")
         );
+    }
+
+    #[tokio::test]
+    async fn chat_is_opt_in_and_loads_alongside_the_defaults() {
+        let defaults = tool_names(&make_mcp(crate::domain::parse_enabled(None).unwrap()).await);
+        assert!(defaults.iter().all(|n| !n.starts_with("chat_")));
+
+        let enabled = crate::domain::parse_enabled(Some("default,chat")).unwrap();
+        let names = tool_names(&make_mcp(enabled).await);
+        let chat = names.iter().filter(|n| n.starts_with("chat_")).count();
+        assert_eq!(chat, 15);
+        assert_eq!(chat, expected_count(Domain::Chat));
+        assert_eq!(names.len(), defaults.len() + chat);
+    }
+
+    #[tokio::test]
+    async fn chat_loads_exactly_its_fifteen_tools() {
+        let names = tool_names(&make_mcp(vec![Domain::Chat]).await);
+        assert_eq!(names.len(), 15);
+        assert!(names.iter().all(|n| n.starts_with("chat_")));
+
+        let mut all = Domain::ALL.to_vec();
+        all.push(Domain::Chat);
+        let full = tool_names(&make_mcp(all).await);
+        let mut sorted = full.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            full.len(),
+            "duplicate tool name with chat enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn instructions_mention_chat_only_when_enabled() {
+        use rmcp::ServerHandler;
+        let text = |d: Vec<Domain>| async move {
+            make_mcp(d)
+                .await
+                .get_info()
+                .instructions
+                .unwrap_or_default()
+        };
+        assert!(
+            !text(Domain::ALL.to_vec())
+                .await
+                .contains("chat_list_spaces")
+        );
+        assert!(
+            text(vec![Domain::Gmail, Domain::Chat])
+                .await
+                .contains("chat_list_spaces")
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_tools_declare_their_effects() {
+        let mcp = make_mcp(vec![Domain::Chat]).await;
+        let tools = mcp.tool_router.list_all();
+        for t in &tools {
+            let a = t
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} has no annotations", t.name));
+            assert!(a.read_only_hint.is_some(), "{}: read_only_hint", t.name);
+            assert!(a.open_world_hint.is_some(), "{}: open_world_hint", t.name);
+            assert_eq!(
+                a.read_only_hint == Some(false),
+                a.destructive_hint.is_some(),
+                "{}: destructive_hint is set exactly on writes",
+                t.name
+            );
+        }
+        let hint = |name: &str| {
+            let t = tools.iter().find(|t| t.name == name).expect(name);
+            let a = t.annotations.as_ref().expect("annotations");
+            (a.read_only_hint, a.destructive_hint, a.open_world_hint)
+        };
+        assert_eq!(hint("chat_list_spaces"), (Some(true), None, Some(false)));
+        assert_eq!(
+            hint("chat_search_messages"),
+            (Some(true), None, Some(false))
+        );
+        assert_eq!(
+            hint("chat_download_attachment"),
+            (Some(false), Some(false), Some(false))
+        );
+        assert_eq!(
+            hint("chat_add_reaction"),
+            (Some(false), Some(false), Some(false))
+        );
+        assert_eq!(
+            hint("chat_update_message"),
+            (Some(false), Some(true), Some(false))
+        );
+        assert_eq!(
+            hint("chat_delete_message"),
+            (Some(false), Some(true), Some(false))
+        );
+        assert_eq!(
+            hint("chat_remove_reaction"),
+            (Some(false), Some(true), Some(false))
+        );
+        // Sending notifies people in the space, so it is the one open-world write.
+        assert_eq!(
+            hint("chat_send_message"),
+            (Some(false), Some(true), Some(true))
+        );
+    }
+
+    /// Clients that validate `inputSchema` reject a boolean schema where a property or item is expected.
+    #[tokio::test]
+    async fn chat_schemas_have_no_boolean_subschemas() {
+        fn assert_concrete(v: &serde_json::Value, path: &str) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        let here = format!("{path}/{key}");
+                        if matches!(key.as_str(), "properties" | "$defs") {
+                            for (name, schema) in child.as_object().into_iter().flatten() {
+                                assert!(schema.is_object(), "{here}/{name} is not an object");
+                            }
+                        }
+                        if key == "items" {
+                            assert!(child.is_object(), "{here} is not an object");
+                        }
+                        assert_concrete(child, &here);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (i, item) in items.iter().enumerate() {
+                        assert_concrete(item, &format!("{path}/{i}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mcp = make_mcp(vec![Domain::Chat]).await;
+        for t in mcp.tool_router.list_all() {
+            let schema = serde_json::Value::Object((*t.input_schema).clone());
+            assert_eq!(schema["type"], "object", "{}", t.name);
+            assert_concrete(&schema, &t.name);
+        }
     }
 
     #[tokio::test]
@@ -642,8 +788,13 @@ impl ServerHandler for GoogleMcp {
         } else {
             ""
         };
+        let chat = if self.state.config.enabled_domains.contains(&Domain::Chat) {
+            " Google Chat (Workspace accounts only) is also enabled; start with chat_list_spaces."
+        } else {
+            ""
+        };
         info.instructions = Some(format!(
-            "{base}{health}\n\n{}",
+            "{base}{health}{chat}\n\n{}",
             file_handling_instructions(self.state.config.file_jail.as_ref())
         ));
         info

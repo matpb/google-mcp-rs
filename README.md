@@ -4,7 +4,7 @@ A multi-tenant **Model Context Protocol** server for **Google Workspace**, writt
 
 It also runs in **single-tenant stdio mode** as a prebuilt binary that any local MCP client (Claude Code, Claude Desktop, Codex, Cursor) launches as a child process — no TLS certificate, no tunnel, no inbound network exposure.
 
-> **Status:** v1.2.0. Gmail (29) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **114 tools** by default, plus an opt-in, read-only **Google Health** domain (11 tools, 125 in total with it; see [Health](#health-11)), plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 115th tool, `google_authenticate`, handles in-chat sign-in.
+> **Status:** v1.2.0. Gmail (29) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **114 tools** by default, plus an opt-in, read-only **Google Health** domain (11 tools, 125 in total with it; see [Health](#health-11)), plus an opt-in **Google Chat** domain (15 tools, Workspace accounts only, 129 in total with the defaults; see [Chat](#chat-15)), plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 115th tool, `google_authenticate`, handles in-chat sign-in.
 
 ## Why
 
@@ -12,6 +12,7 @@ The first-party Google Workspace MCP server is missing fundamentals (you cannot 
 
 - **Full Gmail / Sheets / Drive / Docs / Calendar / Tasks / Contacts / Search Console surface** — 114 tools covering email (search/threads/drafts/send/labels/filters/organize), spreadsheets (CRUD on values + ranges + tabs + raw batchUpdate for formatting/charts), Drive (upload, download, export Google Docs to PDF/CSV/XLSX, share, copy, trash), Google Docs (read as plain text, append/insert/replace, raw batchUpdate for formatting and structure), Google Calendar (calendars + events CRUD, free/busy, quick-add, attendee responses, recurrence), Google Tasks (task lists + tasks CRUD, subtasks, reordering, completion, cross-list moves), Google Contacts (contact CRUD, prefix search, contact groups/labels and their membership), and Google Search Console (properties, sitemaps, search analytics, URL inspection).
 - **Opt-in Google Health (Fitbit data), read-only**: 11 tools over the Google Health API v4beta: steps, heart rate, sleep, HRV, SpO2, exercise (with TCX export), weight and more, with raw reads, reconciled streams and windowed or per-day rollups. Not in the default set: enable it with `ENABLED_DOMAINS=default,health`.
+- **Opt-in Google Chat, acting as you**: 15 tools over the Chat REST API v1 for spaces, direct messages, members, messages, search, attachments, reactions and read state. Workspace accounts only. Not in the default set: enable it with `ENABLED_DOMAINS=default,chat`.
 - **Multi-tenant by design** — every user does their own Google OAuth dance. Refresh tokens are encrypted at rest with AES-256-GCM and bound to the user's Google `sub` via AAD.
 - **OAuth 2.1 done right** — RFC 9728 protected resource metadata, RFC 8414 authorization server metadata, RFC 7591 dynamic client registration, RFC 8707 audience binding, PKCE-S256, a consent screen, and per-account revocation.
 - **Two transports, one binary** — **streamable HTTP** (multi-tenant: one running instance serves many MCP clients and many Google accounts at once), or **stdio** (single-tenant: your MCP client launches it as a local child process, no TLS and nothing on the network). See [Quick start — prebuilt binary (stdio)](#quick-start--prebuilt-binary-stdio).
@@ -164,7 +165,7 @@ Your encrypted Google refresh token lives only on your machine (`~/.google-mcp.d
 In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
 
 1. Pick or create a GCP project.
-2. Enable the **Gmail API**, **Sheets API**, **Drive API**, **Docs API**, **Calendar API**, **Tasks API**, **People API**, and **Search Console API**. For the opt-in Health domain also enable the **Google Health API**.
+2. Enable the **Gmail API**, **Sheets API**, **Drive API**, **Docs API**, **Calendar API**, **Tasks API**, **People API**, and **Search Console API**. For the opt-in Health domain also enable the **Google Health API**. For the opt-in Chat domain enable the **Google Chat API** too, and configure a Chat app on its **Configuration** page: creating, updating and deleting messages need it.
 3. **OAuth consent screen** → External, app name `google-mcp` (or whatever you want users to see), user support email, developer email.
 4. Add scopes:
    - `openid`
@@ -188,6 +189,11 @@ In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
      - `https://www.googleapis.com/auth/googlehealth.profile.readonly`
      - `https://www.googleapis.com/auth/googlehealth.settings.readonly`
      - `https://www.googleapis.com/auth/googlehealth.location.readonly`
+   - Only for the opt-in `chat` domain (Workspace accounts only; `chat.messages` is a restricted scope):
+     - `https://www.googleapis.com/auth/chat.messages`
+     - `https://www.googleapis.com/auth/chat.spaces.readonly`
+     - `https://www.googleapis.com/auth/chat.memberships.readonly`
+     - `https://www.googleapis.com/auth/chat.users.readstate.readonly`
 5. Add yourself + any beta users to the **Test users** list (until the app is verified, only test users can authorize — see [Caveats](#caveats)).
 6. **Credentials** → **Create credentials** → **OAuth 2.0 Client ID** → **Web application**.
 7. Authorized redirect URI: `${BASE_URL}/oauth/google/callback` (e.g. `http://localhost:8433/oauth/google/callback` for dev).
@@ -241,7 +247,7 @@ Every variable `ServerConfig::from_env()` reads, from `src/config.rs`:
 | `DATABASE_URL` | no | `./google-mcp.db` | SQLite file path (or `:memory:` in tests) |
 | `CORS_ALLOW_LOCALHOST` | no | `false` | Allow any loopback origin (`localhost`/`127.0.0.1`/`::1`, any scheme/port) in CORS. Dev only — production always allows only `https://claude.ai` and `https://claude.com` regardless of this setting |
 | `ALLOWED_HOSTS` | no | none | Comma-separated extra `Host`/`X-Forwarded-Host` entries allowed beyond loopback and `BASE_URL`'s own host — e.g. a tunnel or reverse-proxy hostname. Also extends the RFC 8707 `aud`/`resource` allowlist |
-| `ENABLED_DOMAINS` | no | all eight (Health not included) | Comma-separated subset of `gmail,sheets,drive,docs,calendar,tasks,people,searchconsole,health` (`contacts` aliases `people`; `search_console`/`search-console`/`webmasters` alias `searchconsole`; `fitbit` aliases `health`). The token `default` expands to the eight standard domains in place, so `default,health` adds the opt-in Health domain. Filters both the MCP tool surface and the OAuth scopes requested from Google. See [Scoping the surface](#scoping-the-surface) |
+| `ENABLED_DOMAINS` | no | all eight (Health and Chat not included) | Comma-separated subset of `gmail,sheets,drive,docs,calendar,tasks,people,searchconsole,health,chat` (`contacts` aliases `people`; `search_console`/`search-console`/`webmasters` alias `searchconsole`; `fitbit` aliases `health`). The token `default` expands to the eight standard domains in place, so `default,health` adds the opt-in Health domain and `default,chat` adds the opt-in Google Chat domain. Filters both the MCP tool surface and the OAuth scopes requested from Google. See [Scoping the surface](#scoping-the-surface) |
 | `ALLOWED_GOOGLE_ACCOUNTS` | no | unrestricted | Comma-separated exact emails and/or `@domain` entries. A `@domain` entry matches Google's `hd` claim (Workspace domain), not an email suffix. Empty/unset = any Google account may connect |
 | `FILE_ROOT` | no | — (disabled) | Absolute path to the file-exchange directory, bind-mounted into the container at the same path. Enables attaching/uploading by `path` and saving downloads by `dest_path` instead of base64. Unset = base64-only. See [File handling](#file-handling-attachments-uploads-downloads) |
 | `FILE_MAINTENANCE_TOOLS` | no | `off` | Whether the directory-maintenance tools are exposed: `off` (neither), `info` (read-only `files_info`), or `full` (`files_info` + the deleting `files_cleanup`). Off by default, so no deletion/listing tool exists unless you opt in. Only meaningful when `FILE_ROOT` is set |
@@ -268,6 +274,8 @@ ENABLED_DOMAINS=gmail,people     # email + address book: 42 tools
 ENABLED_DOMAINS=searchconsole   # SEO only: 8 tools, webmasters scope
 ENABLED_DOMAINS=default,health  # the standard eight plus Google Health: 125 tools, 9 extra read-only googlehealth.* scopes
 ENABLED_DOMAINS=health          # Health only: 11 tools
+ENABLED_DOMAINS=default,chat    # the standard eight plus Google Chat: 129 tools, 4 extra chat.* scopes
+ENABLED_DOMAINS=chat            # Chat only: 15 tools
 ```
 
 Two things shrink in lockstep:
@@ -275,7 +283,7 @@ Two things shrink in lockstep:
 1. **Tool surface.** Only the listed domains' `tool_router` impls compose into the MCP server. The rest of the tools simply do not exist on this instance — they don't show up in `tools/list`, they don't burn agent context tokens, they can't be called.
 2. **OAuth scopes.** The consent screen asks Google for `openid`, `email`, plus only the scopes for the listed domains. A user authorizing a Gmail-only deployment never grants the server access to their Drive or Calendar.
 
-Domain names are case-insensitive and whitespace-trimmed (`Gmail`, `GMAIL`, `gmail ` all parse the same). Unset, empty, or `ENABLED_DOMAINS=` reverts to the standard eight domains (backwards-compatible default). Google Health is opt-in and never part of that default: name it, or write `default,health`. Turning it on adds its 9 read-only scopes, so existing users must re-consent. An unknown domain name fails fast at startup with the valid list in the error message.
+Domain names are case-insensitive and whitespace-trimmed (`Gmail`, `GMAIL`, `gmail ` all parse the same). Unset, empty, or `ENABLED_DOMAINS=` reverts to the standard eight domains (backwards-compatible default). Google Health is opt-in and never part of that default: name it, or write `default,health`. Turning it on adds its 9 read-only scopes, so existing users must re-consent. Google Chat is opt-in as well: name it, or write `default,chat`. It works only for Workspace accounts, and turning it on adds four `chat.*` scopes, so existing users must re-consent. An unknown domain name fails fast at startup with the valid list in the error message.
 
 ## File handling (attachments, uploads, downloads)
 
@@ -353,7 +361,7 @@ setfacl -m u:65532:rwx ~/Downloads
 
 ## Tools
 
-Every tool carries MCP tool annotations, so clients can ask before the risky ones: reads are `readOnlyHint: true`; writes say `destructiveHint: true` when they lose data, cannot be undone or reach other people (`gmail_send`, `gmail_send_draft`, `drive_share_file`, deletes, overwrites), and `destructiveHint: false` when they only add or are easily reversed (drafts, labels, new files). `openWorldHint: true` marks the tools that reach people or URLs outside the account, including every calendar event write, since `send_updates` can email guests.
+Every tool carries MCP tool annotations, so clients can ask before the risky ones: reads are `readOnlyHint: true`; writes say `destructiveHint: true` when they lose data, cannot be undone or reach other people (`gmail_send`, `gmail_send_draft`, `drive_share_file`, `chat_send_message`, deletes, overwrites), and `destructiveHint: false` when they only add or are easily reversed (drafts, labels, new files). `openWorldHint: true` marks the tools that reach people or URLs outside the account, including every calendar event write, since `send_updates` can email guests.
 
 ### Gmail (29)
 
@@ -557,6 +565,32 @@ The Health API rejects any token that carries other scopes, so the server mints 
 > **Paging can return short pages.** A sleep or exercise page can hold fewer points than `page_size`, even zero, while `nextPageToken` is set: keep paging until it is absent. Rollups are limited to 14 days for calories-in-heart-rate-zone, heart-rate, active-minutes and total-calories, and to 90 days for the other types.
 
 > **Units.** Distance is in millimeters, weight in grams and durations look like `"123s"`. Output is slimmed: civil-time duplicates and create/update times are dropped, dates are `YYYY-MM-DD`, and an identical `dataSource` is reported once at the top of a page.
+
+### Chat (15)
+
+Opt-in, and for Google Workspace accounts only: not in the default set, enable it with `ENABLED_DOMAINS=default,chat` (or `chat` alone). The tools act as the signed-in user over the Google Chat REST API v1. They need the **Google Chat API** enabled in your GCP project, a Chat app configured for create, update and delete calls, and the four `chat.*` scopes. Resource names (`spaces/<id>`, `spaces/<id>/messages/<id>`, `spaces/<id>/threads/<id>`) are passed back verbatim.
+
+| Tool | Purpose |
+|---|---|
+| `chat_list_spaces` | Spaces the user is in (rooms, group chats, direct messages). Filter with `space_type` or a raw `filter`; paged |
+| `chat_get_space` | One space, plus its `space_uri` |
+| `chat_find_direct_message` | The direct message space with a user (email or `users/<id>`). Returns `not_found` until a DM exists |
+| `chat_list_members` | Members of a space with role, state and display name (`unknown user` when Google omits it) |
+| `chat_list_messages` | Messages in a space, bounded by `after`/`before`, narrowed to one `thread`, optionally including deleted ones |
+| `chat_get_message` | One message: sender, text, thread, attachments (with their `resource_name`) and reaction counts |
+| `chat_search_messages` | Keyword search across spaces, with helpers for sender, space, dates, attachments, unread, links and mentions. `raw_filter` sends Google's filter verbatim |
+| `chat_download_attachment` | Write an attachment to `dest_path` inside `FILE_ROOT`; returns `{path, size_bytes}` |
+| `chat_send_message` | Send text and/or attachments (from `FILE_ROOT`, 200 MB in total), optionally into a thread. Sends immediately and notifies the space |
+| `chat_update_message` | Replace the text of a message (32,000 bytes at most) |
+| `chat_delete_message` | Delete a message; `force=true` also deletes its replies |
+| `chat_add_reaction` | Add a unicode emoji reaction |
+| `chat_list_reactions` | Reactions on a message, with the reaction names that `chat_remove_reaction` takes |
+| `chat_remove_reaction` | Remove a reaction by its resource name |
+| `chat_get_read_state` | Last-read time of a space (`space`) or of a thread (`thread`) |
+
+> **Search grammar.** Google does not fully document the Chat search filter. The helpers build `"keywords" AND sender.name = "users/<id>" AND ...`. If a query needs syntax they do not cover, pass it as `raw_filter`.
+
+> **Attachments stay on disk.** Uploads come from `FILE_ROOT` and downloads go to `dest_path` inside it, so bytes never enter the context. An existing download destination is kept unless you pass `overwrite=true`.
 
 ## Error contract
 

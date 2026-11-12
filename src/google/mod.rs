@@ -1,6 +1,7 @@
 //! Google API clients.
 
 pub mod calendar;
+pub mod chat;
 pub mod docs;
 pub mod drive;
 pub mod gmail;

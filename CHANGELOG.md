@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in **Google Chat** domain, enabled with `ENABLED_DOMAINS=default,chat` (Workspace accounts only). 15 `chat_*` tools over the Chat REST API v1, acting as the signed-in user: spaces, direct messages, members, messages and search, attachment download and upload on send, reactions and read state.
+- Enabling the Chat domain adds four scopes: `chat.messages`, `chat.spaces.readonly`, `chat.memberships.readonly` and `chat.users.readstate.readonly`. Existing authorizations must re-authorize before the Chat tools work; until then they return `auth_required`.
+- Creating, updating and deleting Chat messages needs a Chat app configured in the GCP project's Chat API Configuration page.
+
 ## [1.3.1] - 2026-11-10
 
 ### Security

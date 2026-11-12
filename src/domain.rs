@@ -1,5 +1,5 @@
 //! Workspace domains. `ENABLED_DOMAINS` picks the tool surfaces and OAuth scopes;
-//! unset means the default eight, and Health is opt-in (`default,health`).
+//! unset means the default eight. Health and Chat are opt-in (`default,health,chat`).
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -15,6 +15,7 @@ pub enum Domain {
     People,
     SearchConsole,
     Health,
+    Chat,
 }
 
 impl Domain {
@@ -31,7 +32,7 @@ impl Domain {
 
     /// Domains that load only when named in `ENABLED_DOMAINS`.
     #[cfg(test)]
-    pub const OPT_IN: [Domain; 1] = [Domain::Health];
+    pub const OPT_IN: [Domain; 2] = [Domain::Health, Domain::Chat];
 
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -44,6 +45,7 @@ impl Domain {
             Domain::People => "people",
             Domain::SearchConsole => "searchconsole",
             Domain::Health => "health",
+            Domain::Chat => "chat",
         }
     }
 
@@ -59,6 +61,7 @@ impl Domain {
             Domain::People => "Contacts",
             Domain::SearchConsole => "Search Console",
             Domain::Health => "Google Health",
+            Domain::Chat => "Google Chat",
         }
     }
 
@@ -87,6 +90,12 @@ impl Domain {
                 "https://www.googleapis.com/auth/googlehealth.settings.readonly",
                 "https://www.googleapis.com/auth/googlehealth.location.readonly",
             ],
+            Domain::Chat => &[
+                "https://www.googleapis.com/auth/chat.messages",
+                "https://www.googleapis.com/auth/chat.spaces.readonly",
+                "https://www.googleapis.com/auth/chat.memberships.readonly",
+                "https://www.googleapis.com/auth/chat.users.readstate.readonly",
+            ],
         }
     }
 }
@@ -112,8 +121,9 @@ impl FromStr for Domain {
                 Ok(Domain::SearchConsole)
             }
             "health" | "fitbit" => Ok(Domain::Health),
+            "chat" => Ok(Domain::Chat),
             other => Err(format!(
-                "unknown domain '{other}': expected one of gmail, sheets, drive, docs, calendar, tasks, people, searchconsole, health"
+                "unknown domain '{other}': expected one of gmail, sheets, drive, docs, calendar, tasks, people, searchconsole, health, chat"
             )),
         }
     }
@@ -295,7 +305,7 @@ mod tests {
         assert_eq!(parse_enabled(Some("Fitbit")).unwrap(), vec![Domain::Health]);
         assert!(!Domain::ALL.contains(&Domain::Health));
         assert!(!parse_enabled(None).unwrap().contains(&Domain::Health));
-        assert_eq!(Domain::OPT_IN, [Domain::Health]);
+        assert_eq!(Domain::OPT_IN, [Domain::Health, Domain::Chat]);
         assert_eq!(Domain::Health.human_name(), "Google Health");
     }
 
@@ -339,6 +349,46 @@ mod tests {
             .collect();
         assert_eq!(got, want);
         assert_eq!(google_scopes(&[Domain::Health]).len(), 11);
+    }
+
+    #[test]
+    fn chat_parses_by_name_and_is_opt_in() {
+        assert_eq!(parse_enabled(Some("chat")).unwrap(), vec![Domain::Chat]);
+        assert_eq!(parse_enabled(Some("CHAT")).unwrap(), vec![Domain::Chat]);
+        assert!(!Domain::ALL.contains(&Domain::Chat));
+        assert!(!parse_enabled(None).unwrap().contains(&Domain::Chat));
+        let mut want = Domain::ALL.to_vec();
+        want.push(Domain::Chat);
+        assert_eq!(parse_enabled(Some("default,chat")).unwrap(), want);
+        assert_eq!(Domain::Chat.human_name(), "Google Chat");
+        assert_eq!(Domain::Chat.as_str(), "chat");
+    }
+
+    #[test]
+    fn chat_scopes_are_exactly_the_four() {
+        let base = "https://www.googleapis.com/auth/";
+        let want: Vec<String> = [
+            "chat.messages",
+            "chat.spaces.readonly",
+            "chat.memberships.readonly",
+            "chat.users.readstate.readonly",
+        ]
+        .iter()
+        .map(|n| format!("{base}{n}"))
+        .collect();
+        let got: Vec<String> = Domain::Chat
+            .google_scopes()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(got, want);
+        assert_eq!(google_scopes(&[Domain::Chat]).len(), 6);
+    }
+
+    #[test]
+    fn unknown_domain_error_lists_chat() {
+        let err = parse_enabled(Some("bogus")).unwrap_err();
+        assert!(err.contains("health, chat"), "{err}");
     }
 
     #[test]

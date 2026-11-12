@@ -1398,6 +1398,239 @@ pub struct HealthExportTcxParams {
 }
 
 // ---------------------------------------------------------------------------
+// Chat
+// ---------------------------------------------------------------------------
+
+/// Space type shortcut for `chat_list_spaces`.
+#[derive(Debug, Deserialize, JsonSchema, Clone, Copy)]
+pub enum ChatSpaceType {
+    #[serde(rename = "SPACE")]
+    Space,
+    #[serde(rename = "GROUP_CHAT")]
+    GroupChat,
+    #[serde(rename = "DIRECT_MESSAGE")]
+    DirectMessage,
+}
+
+impl ChatSpaceType {
+    /// The Chat API spelling, as used in `spaceType = "..."`.
+    pub fn api_name(self) -> &'static str {
+        match self {
+            ChatSpaceType::Space => "SPACE",
+            ChatSpaceType::GroupChat => "GROUP_CHAT",
+            ChatSpaceType::DirectMessage => "DIRECT_MESSAGE",
+        }
+    }
+}
+
+/// How a threaded reply behaves when it cannot be placed in the thread.
+#[derive(Debug, Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatReplyMode {
+    FallbackNewThread,
+    OrFail,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatListSpacesParams {
+    /// Page size, max 1000.
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+    /// Raw Chat filter, e.g. `spaceType = "SPACE"`. Exclusive with `space_type`.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Shortcut that builds `spaceType = "<value>"`. Exclusive with `filter`.
+    #[serde(default)]
+    pub space_type: Option<ChatSpaceType>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatSpaceParams {
+    /// Space resource name, `spaces/<id>`.
+    pub space: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatFindDirectMessageParams {
+    /// Email address (`someone@example.com`) or user name (`users/<id>`).
+    pub user: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatListMembersParams {
+    /// Space resource name, `spaces/<id>`.
+    pub space: String,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+    /// Raw Chat filter, passed through as-is.
+    #[serde(default)]
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatListMessagesParams {
+    /// Space resource name, `spaces/<id>`.
+    pub space: String,
+    /// Page size, max 1000.
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+    /// Sort order, e.g. `createTime desc`.
+    #[serde(default)]
+    pub order_by: Option<String>,
+    /// Only messages created after this RFC3339 time, e.g. `2026-01-31T12:00:00Z`.
+    #[serde(default)]
+    pub after: Option<String>,
+    /// Only messages created before this RFC3339 time.
+    #[serde(default)]
+    pub before: Option<String>,
+    /// Thread resource name, `spaces/<id>/threads/<id>`, to list one thread.
+    #[serde(default)]
+    pub thread: Option<String>,
+    /// Include deleted messages. Default false.
+    #[serde(default)]
+    pub show_deleted: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatMessageNameParams {
+    /// Message resource name, `spaces/<id>/messages/<id>`.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatSearchMessagesParams {
+    /// Keywords to search for. Required unless `raw_filter` is set.
+    #[serde(default)]
+    pub query: String,
+    /// Only messages from this user, `users/<id>`.
+    #[serde(default)]
+    pub sender: Option<String>,
+    /// Only messages in this space, `spaces/<id>`.
+    #[serde(default)]
+    pub space: Option<String>,
+    /// Only messages created at or after this RFC3339 time.
+    #[serde(default)]
+    pub after: Option<String>,
+    /// Only messages created before this RFC3339 time.
+    #[serde(default)]
+    pub before: Option<String>,
+    /// Only messages with an attachment.
+    #[serde(default)]
+    pub has_attachment: bool,
+    /// Only unread messages.
+    #[serde(default)]
+    pub unread: bool,
+    /// Only messages that contain a link.
+    #[serde(default)]
+    pub has_link: bool,
+    /// Only messages that mention the user.
+    #[serde(default)]
+    pub mentions_me: bool,
+    /// Sort order, e.g. `create_time desc`.
+    #[serde(default)]
+    pub order_by: Option<String>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+    /// Filter sent to Chat verbatim. Replaces `query` and the structured filters.
+    #[serde(default)]
+    pub raw_filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatDownloadAttachmentParams {
+    /// Attachment media name from a message's `attachments[].resource_name`.
+    pub resource_name: String,
+    /// Destination path inside `FILE_ROOT`. Returns `{ path, size_bytes }`.
+    pub dest_path: String,
+    /// Replace the destination if it exists. Default false.
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatSendMessageParams {
+    /// Space resource name, `spaces/<id>`.
+    pub space: String,
+    /// Message text, at most 32,000 bytes. Required unless `attachments` is set.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Reply in this thread, `spaces/<id>/threads/<id>`. Exclusive with `thread_key`.
+    #[serde(default)]
+    pub thread: Option<String>,
+    /// Reply in the thread with this client-chosen key. Exclusive with `thread`.
+    #[serde(default)]
+    pub thread_key: Option<String>,
+    /// With `thread` or `thread_key`: `fallback_new_thread` (default) or `or_fail`.
+    #[serde(default)]
+    pub reply_mode: Option<ChatReplyMode>,
+    /// Files to attach, inside `FILE_ROOT`. 200 MB total.
+    #[serde(default)]
+    pub attachments: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatUpdateMessageParams {
+    /// Message resource name, `spaces/<id>/messages/<id>`.
+    pub name: String,
+    /// Replacement text, at most 32,000 bytes.
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatDeleteMessageParams {
+    /// Message resource name, `spaces/<id>/messages/<id>`.
+    pub name: String,
+    /// Also delete the message's replies. Default false.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatAddReactionParams {
+    /// Message resource name, `spaces/<id>/messages/<id>`.
+    pub message: String,
+    /// Unicode emoji, e.g. `👍`.
+    pub emoji: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatListReactionsParams {
+    /// Message resource name, `spaces/<id>/messages/<id>`.
+    pub message: String,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub page_token: Option<String>,
+    /// Raw Chat filter, passed through as-is.
+    #[serde(default)]
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatRemoveReactionParams {
+    /// Reaction resource name, `spaces/<id>/messages/<id>/reactions/<id>`.
+    pub reaction_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChatGetReadStateParams {
+    /// Space resource name for the space read state. Exclusive with `thread`.
+    #[serde(default)]
+    pub space: Option<String>,
+    /// Thread resource name for the thread read state. Exclusive with `space`.
+    #[serde(default)]
+    pub thread: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // People (Contacts)
 // ---------------------------------------------------------------------------
 
