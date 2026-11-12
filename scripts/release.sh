@@ -137,6 +137,9 @@ echo "==> Linux + Windows builds"
 rm -rf dist
 mkdir -p dist
 
+# Keep local home and checkout paths out of the shipped binaries.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$HOME=/build --remap-path-prefix=$ROOT=/build/google-mcp-rs"
+
 cargo zigbuild --release --bin google-mcp --target x86_64-unknown-linux-musl
 cargo zigbuild --release --bin google-mcp --target aarch64-unknown-linux-musl
 cargo xwin build --release --bin google-mcp --target x86_64-pc-windows-msvc
@@ -145,6 +148,10 @@ cp target/x86_64-unknown-linux-musl/release/google-mcp dist/google-mcp-linux-x86
 cp target/aarch64-unknown-linux-musl/release/google-mcp dist/google-mcp-linux-aarch64
 cp target/x86_64-pc-windows-msvc/release/google-mcp.exe dist/google-mcp-windows-x86_64.exe
 chmod +x dist/google-mcp-linux-x86_64 dist/google-mcp-linux-aarch64
+
+for f in dist/google-mcp-*; do
+  ! strings "$f" | grep -qF "$HOME" || die "$f still embeds a path under \$HOME"
+done
 
 expected="google-mcp $VERSION"
 
@@ -182,6 +189,7 @@ if [[ "$SKIP_MAC" -eq 0 ]]; then
 set -euo pipefail
 export PATH="/usr/bin:/usr/sbin:/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
 cd "$MAC_REPO_DIR"
+export RUSTFLAGS="--remap-path-prefix=$HOME=/build --remap-path-prefix=$PWD=/build/google-mcp-rs"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" ~/Library/Keychains/login.keychain-db
 cargo build --release --bin google-mcp --target aarch64-apple-darwin
 cargo build --release --bin google-mcp --target x86_64-apple-darwin
@@ -203,6 +211,8 @@ REMOTE
 
   rsync "$MAC_HOST:$MAC_REPO_DIR/dist/google-mcp-macos-universal" dist/
   chmod +x dist/google-mcp-macos-universal
+  ! strings dist/google-mcp-macos-universal | grep -q '/Users/' \
+    || die "macOS binary still embeds a /Users/ path"
 
   # shellcheck disable=SC2029
   out="$(ssh "$MAC_HOST" "$MAC_REPO_DIR/dist/google-mcp-macos-universal --version")"

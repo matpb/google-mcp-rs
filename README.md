@@ -4,7 +4,7 @@ A multi-tenant **Model Context Protocol** server for **Google Workspace**, writt
 
 It also runs in **single-tenant stdio mode** as a prebuilt binary that any local MCP client (Claude Code, Claude Desktop, Codex, Cursor) launches as a child process — no TLS certificate, no tunnel, no inbound network exposure.
 
-> **Status:** v1.2.0. Gmail (29) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **114 tools** by default, plus an opt-in, read-only **Google Health** domain (11 tools, 125 in total with it; see [Health](#health-11)), plus an opt-in **Google Chat** domain (15 tools, Workspace accounts only, 129 in total with the defaults; see [Chat](#chat-15)), plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 115th tool, `google_authenticate`, handles in-chat sign-in.
+> **Status:** v1.4.0. Gmail (29) + Sheets (11) + Drive (14) + Docs (12) + Calendar (14) + Tasks (13) + People/Contacts (13) + Search Console (8) live. **114 tools** by default, plus an opt-in, read-only **Google Health** domain (11 tools, 125 in total with it; see [Health](#health-11)), plus an opt-in **Google Chat** domain (15 tools, Workspace accounts only, 129 in total with the defaults; see [Chat](#chat-15)), plus a path-based **file exchange** (attach/upload/download by path, no base64) and 2 opt-in maintenance tools gated by `FILE_MAINTENANCE_TOOLS`. In stdio mode a 115th tool, `google_authenticate`, handles in-chat sign-in.
 
 ## Why
 
