@@ -522,8 +522,13 @@ impl From<SessionError> for McpError {
                     resource_id: None,
                     reconnect_url: None,
                 },
-                GoogleOAuthError::ParseResponse { source, body } => McpError::internal(format!(
-                    "Google /token returned a malformed response: {source}; body: {body}"
+                GoogleOAuthError::ParseResponse {
+                    category,
+                    line,
+                    column,
+                    body_len,
+                } => McpError::internal(format!(
+                    "Google /token returned a malformed response ({category} error at line {line} column {column}, {body_len} bytes)"
                 ))
                 .with_service("oauth"),
                 GoogleOAuthError::IdToken(s) => McpError::internal(format!("ID token parse: {s}"))
@@ -973,6 +978,55 @@ mod tests {
         assert_eq!(err.category, Category::AuthInvalid);
         let data = err.data();
         assert_eq!(data.get("upstream_reason").unwrap(), "audience_mismatch");
+    }
+
+    #[test]
+    fn parse_response_error_omits_token_body() {
+        use crate::oauth::google::{TokenGrant, json_error_category};
+        // (body, expected Display, expected McpError message); expected values are serde's own
+        // class, line and column for each input, with the byte length of the body.
+        let cases = [
+            (
+                r#"{"access_token":"ya29.SECRET","refresh_token":"1//REFRESHSECRET","token_type":"Bearer"}"#,
+                "could not parse Google response (data error at line 1 column 87, 87 bytes)",
+                "Google /token returned a malformed response (data error at line 1 column 87, 87 bytes)",
+            ),
+            (
+                r#"{"access_token":"ya29.SECRET","refresh_token":"1//REFRESHSECRET""#,
+                "could not parse Google response (eof error at line 1 column 64, 64 bytes)",
+                "Google /token returned a malformed response (eof error at line 1 column 64, 64 bytes)",
+            ),
+            (
+                r#"{"access_token":"ya29.SECRET","refresh_token":"1//REFRESHSECRET","expires_in":"ya29.LEAKED"}"#,
+                "could not parse Google response (data error at line 1 column 91, 92 bytes)",
+                "Google /token returned a malformed response (data error at line 1 column 91, 92 bytes)",
+            ),
+        ];
+        for (body, display, mapped_message) in cases {
+            let e = serde_json::from_str::<TokenGrant>(body).unwrap_err();
+            let make = || GoogleOAuthError::ParseResponse {
+                category: json_error_category(&e),
+                line: e.line(),
+                column: e.column(),
+                body_len: body.len(),
+            };
+            let shown = make().to_string();
+            assert_eq!(shown, display);
+            let debugged = format!("{:?}", make());
+            assert!(!debugged.contains("SECRET"), "{debugged}");
+            assert!(!debugged.contains("LEAKED"), "{debugged}");
+            assert!(
+                debugged.contains(&format!("body_len: {}", body.len())),
+                "{debugged}"
+            );
+            let mapped: McpError = SessionError::Google(make()).into();
+            assert_eq!(mapped.category, Category::Internal);
+            assert_eq!(mapped.service, Some("oauth"));
+            assert_eq!(mapped.message, mapped_message);
+            let mapped_debug = format!("{mapped:?}");
+            assert!(!mapped_debug.contains("SECRET"), "{mapped_debug}");
+            assert!(!mapped_debug.contains("LEAKED"), "{mapped_debug}");
+        }
     }
 
     #[test]

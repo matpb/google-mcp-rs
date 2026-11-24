@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- rmcp 3.9.0 -> 3.11.0. Unadvertised `resources`, `prompts` and `completion` methods now return method-not-found; serverInfo now reports the `google-mcp` name and version instead of rmcp's.
+
+### Security
+
+- A malformed Google token-endpoint response no longer leaks its body into logs or error text. The error now reports only the error class, line, column and byte length, because the body carries `access_token` and `refresh_token`.
+
 ## [1.4.0] - 2026-11-12
 
 ### Added

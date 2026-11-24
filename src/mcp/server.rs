@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use http::request::Parts;
 use rmcp::handler::server::tool::ToolRouter;
-use rmcp::model::{ServerCapabilities, ServerConfig};
+use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{ErrorData, ServerHandler, tool_handler};
 
 use crate::credentials::resolve_google;
@@ -763,6 +763,8 @@ impl ServerHandler for GoogleMcp {
     fn get_info(&self) -> ServerConfig {
         let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        // Default would report rmcp's own crate name and version.
+        info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         let base = "Google Workspace MCP — Gmail + Sheets + Drive + Docs + Calendar + Tasks + \
              Contacts + Search Console. \
              Multi-tenant: each user authorizes via the OAuth flow at \

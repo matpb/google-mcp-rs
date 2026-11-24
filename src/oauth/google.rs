@@ -185,8 +185,10 @@ impl GoogleOAuthClient {
         let text = String::from_utf8_lossy(&bytes).into_owned();
         if status.is_success() {
             return serde_json::from_str(&text).map_err(|e| GoogleOAuthError::ParseResponse {
-                source: e,
-                body: text,
+                category: json_error_category(&e),
+                line: e.line(),
+                column: e.column(),
+                body_len: text.len(),
             });
         }
         // Try to parse a typed Google error.
@@ -222,6 +224,17 @@ enum TokenRequest<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         scope: Option<&'a str>,
     },
+}
+
+/// Names the error class only: the `serde_json` message can echo input string values.
+pub(crate) fn json_error_category(e: &serde_json::Error) -> &'static str {
+    use serde_json::error::Category;
+    match e.classify() {
+        Category::Io => "io",
+        Category::Syntax => "syntax",
+        Category::Data => "data",
+        Category::Eof => "eof",
+    }
 }
 
 /// Parses without verifying the JWT signature (TLS to Google's token

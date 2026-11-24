@@ -37,11 +37,14 @@ pub enum GoogleOAuthError {
     InvalidGrant,
     #[error("unexpected response {status}: {body}")]
     Unexpected { status: ReqwestStatus, body: String },
-    #[error("could not parse Google response: {source}\nbody: {body}")]
+    #[error(
+        "could not parse Google response ({category} error at line {line} column {column}, {body_len} bytes)"
+    )]
     ParseResponse {
-        #[source]
-        source: serde_json::Error,
-        body: String,
+        category: &'static str,
+        line: usize,
+        column: usize,
+        body_len: usize,
     },
     #[error("id token parse: {0}")]
     IdToken(String),
