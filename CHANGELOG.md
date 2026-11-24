@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-24
+
 ### Changed
 
 - rmcp 3.9.0 -> 3.11.0. Unadvertised `resources`, `prompts` and `completion` methods now return method-not-found; serverInfo now reports the `google-mcp` name and version instead of rmcp's.
+- mail-builder 1.0 -> 2.0: short MIME parts are now quoted-printable instead of base64. Gmail accepts both identically.
 
 ### Security
 
