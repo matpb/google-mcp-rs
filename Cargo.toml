@@ -45,7 +45,7 @@ argon2 = "0.6"
 getrandom = "0.4"
 
 # Storage
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 
 # MIME
 mail-builder = "2.0"
